@@ -434,7 +434,12 @@ export async function setActivePresetId(id: string): Promise<void> {
 // 润色模式切换快捷键：presetId -> 组合键（如 "Alt+1"）。独立于 PromptPreset 存储，
 // 便于 Rust 端直接读取并注册（内置预设定义在 TS，不在 store 中）。
 export async function getPresetShortcuts(): Promise<Record<string, string>> {
-  return ((await api().storeGet('presetShortcuts')) as Record<string, string>) || {}
+  const raw = await api().storeGet('presetShortcuts')
+  if (raw && typeof raw === 'object' && !Array.isArray(raw) && Object.keys(raw as object).length > 0) {
+    return raw as Record<string, string>
+  }
+  // 未配置时用推荐绑定（与 defaults.presetShortcuts / Rust 兜底一致）
+  return { ...RECOMMENDED_PRESET_SHORTCUTS }
 }
 
 export async function setPresetShortcuts(map: Record<string, string>): Promise<void> {

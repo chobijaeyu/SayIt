@@ -17,6 +17,13 @@ export const DEFAULTS: Record<string, unknown> = {
   // ── 快捷键 ──
   shortcutPTT: 'ShiftRight', // 按住说话。可选: 'AltLeft' | 'AltRight' | 'ControlLeft' | 'ControlRight' | 'ShiftLeft' | 'ShiftRight' | 'Space' | 'CapsLock' 等单键
   shortcutHandsFree: 'AltRight', // 免提模式。默认右 Alt 单键。也支持组合键格式如 'Control+Shift+S'
+  // 润色模式切换（与 store.RECOMMENDED_PRESET_SHORTCUTS 保持一致；用户可改/清空）
+  presetShortcuts: {
+    intent: 'Alt+1',
+    zh2en: 'Alt+2',
+    zh2ja: 'Alt+3',
+    casual: 'Alt+4',
+  },
 
   // ── 麦克风 ──
   selectedMic: '', // 设备 ID，空字符串 = 系统默认

@@ -49,8 +49,24 @@ pub fn register_all_global_shortcuts(app: &AppHandle, storage: &Storage) {
     }
 
     // 润色模式切换快捷键：presetShortcuts = { presetId: 组合键 }
+    // 未配置时使用与前端 RECOMMENDED_PRESET_SHORTCUTS 一致的默认绑定
     let preset_map = storage.get("presetShortcuts", None);
-    if let Some(obj) = preset_map.as_object() {
+    let default_map = serde_json::json!({
+        "intent": "Alt+1",
+        "zh2en": "Alt+2",
+        "zh2ja": "Alt+3",
+        "casual": "Alt+4",
+    });
+    let map_ref = if preset_map.as_object().map(|o| !o.is_empty()).unwrap_or(false) {
+        &preset_map
+    } else {
+        log::info!("presetShortcuts empty — using recommended defaults Alt+1..4");
+        crate::commands::system::write_log_line(
+            "[shortcuts] presetShortcuts empty — registering recommended Alt+1..4",
+        );
+        &default_map
+    };
+    if let Some(obj) = map_ref.as_object() {
         for (preset_id, val) in obj {
             let accel = match val.as_str() {
                 Some(s) if !s.is_empty() && s.contains('+') => s.to_string(),
@@ -71,6 +87,16 @@ pub fn register_all_global_shortcuts(app: &AppHandle, storage: &Storage) {
                     "Failed to register preset shortcut '{}' for '{}': {}",
                     accel_for_log, preset_id, e
                 );
+                crate::commands::system::write_log_line(&format!(
+                    "[shortcuts] FAILED register preset {} -> {}: {}",
+                    preset_id, accel_for_log, e
+                ));
+            } else {
+                log::info!("Registered preset shortcut {} -> {}", accel_for_log, preset_id);
+                crate::commands::system::write_log_line(&format!(
+                    "[shortcuts] registered preset {} -> {}",
+                    preset_id, accel_for_log
+                ));
             }
         }
     }
