@@ -6,7 +6,7 @@ use super::{
     asr_qwen, asr_qwen_omni,
 };
 
-/// 云端 AI 校对（Tauri command）
+/// 云端 AI 校对（Tauri command）— 主路径，短输出
 #[tauri::command]
 pub async fn cloud_polish(request: CloudPolishRequest) -> Result<AiResult, String> {
     let config = &request.ai_config;
@@ -26,6 +26,38 @@ pub async fn cloud_polish(request: CloudPolishRequest) -> Result<AiResult, Strin
                 request.system_prompt.as_deref(),
             )
             .await
+        }
+        other => Err(format!("未知的 AI 供应商: {}", other)),
+    }
+}
+
+/// 历史「学习」讲解（Tauri command）— 与 polish 隔离，可要求 JSON / 更高 token
+#[tauri::command]
+pub async fn cloud_learning(request: CloudLearningRequest) -> Result<AiResult, String> {
+    let config = &request.ai_config;
+    let system = request
+        .system_prompt
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .ok_or_else(|| "learning system_prompt 不能为空".to_string())?;
+    let max_tokens = request.max_tokens.unwrap_or(2048);
+    let prefer_json = request.prefer_json.unwrap_or(true);
+
+    match config.provider.as_str() {
+        "openai_compat" | "deepseek" | "doubao" | "qwen" | "mimo" => {
+            ai_openai_compat::learning_complete(
+                &request.text,
+                config,
+                system,
+                max_tokens,
+                prefer_json,
+            )
+            .await
+        }
+        // Ollama 走本地 /api/generate，无 response_format；靠 prompt 约束 JSON
+        "ollama" => {
+            let _ = (max_tokens, prefer_json);
+            ai_ollama::learning_complete(&request.text, config, system).await
         }
         other => Err(format!("未知的 AI 供应商: {}", other)),
     }

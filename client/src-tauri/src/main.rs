@@ -564,6 +564,7 @@ fn main() {
             commands::diagnostics::open_log_folder,
             // Providers (cloud ASR / AI)
             providers::registry::cloud_polish,
+            providers::registry::cloud_learning,
             providers::registry::cloud_transcribe,
             providers::registry::test_ai_connection,
             providers::registry::test_asr_connection,

@@ -5,11 +5,66 @@ use super::prompt::wrap_user_text;
 use super::types::{AiProviderConfig, AiResult, TestResult};
 use std::time::Instant;
 
-/// 调用 OpenAI 兼容接口进行文本校对
+/// 校对主路径：固定短输出、wrap user、不强制 JSON
 pub async fn polish(
     text: &str,
     config: &AiProviderConfig,
     system_prompt: Option<&str>,
+) -> Result<AiResult, String> {
+    chat_complete(
+        text,
+        config,
+        system_prompt.unwrap_or("你是语音转文本的校对助手。"),
+        ChatCompleteOptions {
+            max_tokens: 1024,
+            temperature: 0.2,
+            wrap_user: true,
+            prefer_json_object: false,
+            empty_fallback_to_input: true,
+            log_label: "polish",
+        },
+    )
+    .await
+}
+
+/// 学习路径：更高 max_tokens，尽量 JSON object，空结果不当作原文回退
+pub async fn learning_complete(
+    text: &str,
+    config: &AiProviderConfig,
+    system_prompt: &str,
+    max_tokens: u32,
+    prefer_json: bool,
+) -> Result<AiResult, String> {
+    chat_complete(
+        text,
+        config,
+        system_prompt,
+        ChatCompleteOptions {
+            max_tokens: max_tokens.clamp(256, 4096),
+            temperature: 0.2,
+            wrap_user: true,
+            prefer_json_object: prefer_json,
+            empty_fallback_to_input: false,
+            log_label: "learning",
+        },
+    )
+    .await
+}
+
+struct ChatCompleteOptions {
+    max_tokens: u32,
+    temperature: f32,
+    wrap_user: bool,
+    prefer_json_object: bool,
+    empty_fallback_to_input: bool,
+    log_label: &'static str,
+}
+
+async fn chat_complete(
+    text: &str,
+    config: &AiProviderConfig,
+    system_prompt: &str,
+    opts: ChatCompleteOptions,
 ) -> Result<AiResult, String> {
     if text.trim().is_empty() {
         return Ok(AiResult {
@@ -21,20 +76,33 @@ pub async fn polish(
     let base_url = normalize_base_url(&config.api_url);
     let url = format!("{}/chat/completions", base_url);
 
-    let sys_prompt = system_prompt.unwrap_or("你是语音转文本的校对助手。");
-    let user_content = wrap_user_text(text);
+    let user_content = if opts.wrap_user {
+        wrap_user_text(text)
+    } else {
+        text.to_string()
+    };
 
     let mut body = serde_json::json!({
         "model": config.model,
-        "temperature": 0.2,
-        "max_tokens": 1024,
+        "temperature": opts.temperature,
+        "max_tokens": opts.max_tokens,
         "messages": [
-            { "role": "system", "content": sys_prompt },
+            { "role": "system", "content": system_prompt },
             { "role": "user", "content": user_content },
         ]
     });
 
     inject_disable_thinking(&mut body, config);
+
+    // 尽量要 JSON（不支持的模型可能 400，由上层/前端降级重试）
+    if opts.prefer_json_object {
+        if let Some(obj) = body.as_object_mut() {
+            obj.insert(
+                "response_format".to_string(),
+                serde_json::json!({ "type": "json_object" }),
+            );
+        }
+    }
 
     let client = reqwest::Client::new();
     let start = Instant::now();
@@ -47,11 +115,9 @@ pub async fn polish(
         .post(&url)
         .header("Authorization", format!("Bearer {}", api_key))
         .header("Content-Type", "application/json");
-    // 小米 MiMo 规范鉴权头为 api-key（同时兼容 Bearer），两个都带最稳妥
     if config.provider == "mimo" {
         req = req.header("api-key", api_key.to_string());
     }
-    // OpenRouter 官方/企业代理：可选归属头（不影响鉴权，部分网关会校验 Referer）
     if url.contains("openrouter.ai") || config.api_url.to_ascii_lowercase().contains("openrouter") {
         req = req
             .header("HTTP-Referer", "https://github.com/chobijaeyu/SayIt")
@@ -59,7 +125,7 @@ pub async fn polish(
     }
     let resp = req
         .json(&body)
-        .timeout(std::time::Duration::from_secs(60))
+        .timeout(std::time::Duration::from_secs(90))
         .send()
         .await
         .map_err(|e| format!("HTTP 请求失败: {}", describe_reqwest_error(&e)))?;
@@ -82,7 +148,6 @@ pub async fn polish(
         .await
         .map_err(|e| format!("解析响应失败: {}", e))?;
 
-    // 便于对照 OpenRouter Activity：看实际落到哪个 host、是否仍在 reasoning
     if let Some(provider) = data.get("provider").and_then(|v| v.as_str()) {
         let reason_tok = data
             .get("usage")
@@ -91,7 +156,8 @@ pub async fn polish(
             .and_then(|v| v.as_u64())
             .unwrap_or(0);
         log::info!(
-            "ai polish provider={} model={} elapsed_ms={} reasoning_tokens={}",
+            "ai {} provider={} model={} elapsed_ms={} reasoning_tokens={}",
+            opts.log_label,
             provider,
             config.model,
             elapsed_ms,
@@ -99,14 +165,21 @@ pub async fn polish(
         );
     }
 
-    let result_text = extract_chat_completion_text(&data)
-        .unwrap_or_else(|| text.to_string());
-
-    // 去除 <think>...</think> 标签（部分模型如 Qwen3 会输出思考过程）
+    let result_text = extract_chat_completion_text(&data).unwrap_or_default();
     let cleaned = strip_thinking(&result_text);
 
+    let text_out = if cleaned.is_empty() {
+        if opts.empty_fallback_to_input {
+            text.to_string()
+        } else {
+            String::new()
+        }
+    } else {
+        cleaned
+    };
+
     Ok(AiResult {
-        text: if cleaned.is_empty() { text.to_string() } else { cleaned },
+        text: text_out,
         elapsed_ms,
     })
 }

@@ -11,6 +11,30 @@ pub async fn polish(
     config: &AiProviderConfig,
     system_prompt: Option<&str>,
 ) -> Result<AiResult, String> {
+    generate(
+        text,
+        config,
+        system_prompt.unwrap_or("你是语音转文本的校对助手。"),
+        true,
+    )
+    .await
+}
+
+/// 历史「学习」：不把空结果回退成原文（避免把 ASR 当讲解缓存）
+pub async fn learning_complete(
+    text: &str,
+    config: &AiProviderConfig,
+    system_prompt: &str,
+) -> Result<AiResult, String> {
+    generate(text, config, system_prompt, false).await
+}
+
+async fn generate(
+    text: &str,
+    config: &AiProviderConfig,
+    system_prompt: &str,
+    empty_fallback_to_input: bool,
+) -> Result<AiResult, String> {
     if text.trim().is_empty() {
         return Ok(AiResult {
             text: String::new(),
@@ -19,10 +43,9 @@ pub async fn polish(
     }
 
     let url = normalize_url(&config.api_url);
-    let sys_prompt = system_prompt.unwrap_or("你是语音转文本的校对助手。");
     // Ollama /api/generate 是单一 prompt 字符串，没有 system/user 角色区分，
     // 这里手动拼接：system prompt 在前，user 消息（中性标签包裹）在后。
-    let combined = format!("{}\n\n{}", sys_prompt, wrap_user_text(text));
+    let combined = format!("{}\n\n{}", system_prompt, wrap_user_text(text));
 
     let model = if config.model.is_empty() {
         "qwen2.5:7b"
@@ -68,8 +91,18 @@ pub async fn polish(
         .trim()
         .to_string();
 
+    let text_out = if result_text.is_empty() {
+        if empty_fallback_to_input {
+            text.to_string()
+        } else {
+            String::new()
+        }
+    } else {
+        result_text
+    };
+
     Ok(AiResult {
-        text: if result_text.is_empty() { text.to_string() } else { result_text },
+        text: text_out,
         elapsed_ms,
     })
 }

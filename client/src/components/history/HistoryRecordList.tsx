@@ -8,9 +8,16 @@ import { pickVoiceDurationSec } from '@/services/timeModel'
 import { loadAudioAsDataUrl } from '@/services/audioFileService'
 import { invoke } from '@tauri-apps/api/core'
 import {
+  buildLearningFingerprint,
   canLearnFromRecord,
   explainHistoryRecord,
+  isLearningCacheFresh,
   isLikelyTranslationRecord,
+  learningCacheToPersistPayload,
+  parseLearningCache,
+  type LearningCacheV1,
+  type LearningContentV1,
+  type LearningPersistPayload,
 } from '@/services/translationLearning'
 
 /** 云 API 内部 key → 用户友好的模型 ID */
@@ -32,8 +39,8 @@ interface HistoryRecordListProps {
   onReprocess?: (record: HistoryRecord) => Promise<void> | void
   /** 手工编辑转换结果并保存 */
   onEdit?: (id: string, nextText: string) => Promise<void> | void
-  /** 缓存「学习」讲解到历史记录 */
-  onLearningNotes?: (id: string, notes: string) => Promise<void> | void
+  /** 缓存「学习」讲解到历史记录（结构化 v1 + 兼容 notes） */
+  onLearningNotes?: (id: string, payload: LearningPersistPayload) => Promise<void> | void
   emptyText?: string
   /** 搜索关键词：在正文与 ASR 原文里高亮命中处 */
   highlight?: string
@@ -96,7 +103,7 @@ function HistoryItem({
   onToggleFavorite?: (nextFavorite: boolean) => void
   onReprocess?: () => Promise<void> | void
   onEdit?: (nextText: string) => Promise<void> | void
-  onLearningNotes?: (notes: string) => Promise<void> | void
+  onLearningNotes?: (payload: LearningPersistPayload) => Promise<void> | void
   highlight?: string
 }) {
   const [expanded, setExpanded] = useState(false)
@@ -116,52 +123,77 @@ function HistoryItem({
   const [learningOpen, setLearningOpen] = useState(false)
   const [learningLoading, setLearningLoading] = useState(false)
   const [learningError, setLearningError] = useState('')
+  const [learningSaveWarn, setLearningSaveWarn] = useState('')
   const [learningNotes, setLearningNotes] = useState(record.learningNotes || '')
+  const [learningCache, setLearningCache] = useState<LearningCacheV1 | null>(
+    () => parseLearningCache(record.learningCache) ,
+  )
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const audioUrlRef = useRef<string>('')
   const rafRef = useRef<number>(0)
+  const learningInFlightRef = useRef(false)
+  const learningFingerprintRef = useRef('')
 
   const text = record.llmText || record.asrText
   const isEmpty = record.isEmpty || (!text && record.charCount === 0)
   const canLearn = canLearnFromRecord(record)
   const learnIsTranslation = isLikelyTranslationRecord(record)
+  const cacheFresh = isLearningCacheFresh(learningCache, record)
+  const hasLearning = cacheFresh || !!(learningNotes && learningNotes.trim())
 
   useEffect(() => {
     setLearningNotes(record.learningNotes || '')
-  }, [record.id, record.learningNotes])
+    setLearningCache(parseLearningCache(record.learningCache))
+    setLearningError('')
+    setLearningSaveWarn('')
+  }, [record.id, record.learningNotes, record.learningCache, record.asrText, record.llmText, record.promptPresetId])
+
+  const runLearning = useCallback(async (force: boolean) => {
+    if (!canLearn) return
+    if (learningInFlightRef.current) return
+    setLearningOpen(true)
+    setLearningError('')
+    setLearningSaveWarn('')
+
+    // 已有缓存内容：只展开，不自动重请求（过期提示在面板内；点「重新生成」才 force）
+    if (!force && learningCache?.content) return
+    if (!force && learningNotes.trim()) return
+
+    learningInFlightRef.current = true
+    setLearningLoading(true)
+    const expectedFp = buildLearningFingerprint(record)
+    learningFingerprintRef.current = expectedFp
+
+    try {
+      const cache = await explainHistoryRecord(record)
+      // 请求期间文本/preset 变了：丢弃迟到响应，防止覆盖新内容
+      if (buildLearningFingerprint(record) !== expectedFp) {
+        return
+      }
+      setLearningCache(cache)
+      setLearningNotes(cache.content.summaryZh)
+      if (onLearningNotes) {
+        try {
+          await onLearningNotes(learningCacheToPersistPayload(cache))
+        } catch {
+          setLearningSaveWarn('讲解已生成，但未能写入本地缓存')
+        }
+      }
+    } catch (err) {
+      setLearningError(String(err))
+    } finally {
+      learningInFlightRef.current = false
+      setLearningLoading(false)
+    }
+  }, [canLearn, learningCache, learningNotes, onLearningNotes, record])
 
   const handleLearn = useCallback(async () => {
-    if (!canLearn) return
-    setLearningOpen(true)
-    setLearningError('')
-    if (learningNotes.trim()) return
-    setLearningLoading(true)
-    try {
-      const notes = await explainHistoryRecord(record)
-      setLearningNotes(notes)
-      if (onLearningNotes) await onLearningNotes(notes)
-    } catch (err) {
-      setLearningError(String(err))
-    } finally {
-      setLearningLoading(false)
-    }
-  }, [canLearn, learningNotes, onLearningNotes, record])
+    await runLearning(false)
+  }, [runLearning])
 
   const handleRefreshLearn = useCallback(async () => {
-    if (!canLearn) return
-    setLearningOpen(true)
-    setLearningError('')
-    setLearningLoading(true)
-    try {
-      const notes = await explainHistoryRecord(record)
-      setLearningNotes(notes)
-      if (onLearningNotes) await onLearningNotes(notes)
-    } catch (err) {
-      setLearningError(String(err))
-    } finally {
-      setLearningLoading(false)
-    }
-  }, [canLearn, onLearningNotes, record])
+    await runLearning(true)
+  }, [runLearning])
   const voiceDurationSec = pickVoiceDurationSec({
     holdSec: record.durationSec,
     audioSec: record.audioDurationSec,
@@ -533,7 +565,7 @@ function HistoryItem({
                           {learnIsTranslation ? '翻译学习' : '润色学习'}
                         </span>
                         <div className="flex items-center gap-1">
-                          {learningNotes.trim() && !learningLoading && (
+                          {(hasLearning || learningError) && !learningLoading && (
                             <button
                               type="button"
                               onClick={() => { void handleRefreshLearn() }}
@@ -570,8 +602,26 @@ function HistoryItem({
                       {learningError && (
                         <p className="text-destructive">{learningError}</p>
                       )}
-                      {!learningLoading && learningNotes.trim() && (
+                      {learningSaveWarn && (
+                        <p className="text-amber-700 dark:text-amber-300">{learningSaveWarn}</p>
+                      )}
+                      {!learningLoading && learningCache?.content && (
+                        <>
+                          {!cacheFresh && (
+                            <p className="mb-2 text-[11px] text-amber-700 dark:text-amber-300">
+                              文本或模式已变更，讲解可能过期，建议重新生成
+                            </p>
+                          )}
+                          <LearningContentView
+                            content={learningCache.content}
+                            mode={learningCache.mode}
+                            isTranslation={learnIsTranslation}
+                          />
+                        </>
+                      )}
+                      {!learningLoading && !learningCache?.content && learningNotes.trim() && (
                         <div className="whitespace-pre-wrap border-t border-border/60 pt-2 text-[12px] leading-relaxed">
+                          <p className="mb-1 text-[11px] text-muted-foreground">旧版讲解（重新生成可升级为结构化）</p>
                           {learningNotes}
                         </div>
                       )}
@@ -660,7 +710,7 @@ function HistoryItem({
                 {learningLoading ? (
                   <Loader2 className="h-3.5 w-3.5 animate-spin text-sky-600" />
                 ) : (
-                  <GraduationCap className={`h-3.5 w-3.5 ${learningNotes ? 'text-sky-600' : 'text-muted-foreground'}`} />
+                  <GraduationCap className={`h-3.5 w-3.5 ${hasLearning ? 'text-sky-600' : 'text-muted-foreground'}`} />
                 )}
               </button>
             </Tooltip>
@@ -730,7 +780,7 @@ function DayGroup({
   onToggleFavorite?: (id: string, nextFavorite: boolean) => Promise<void> | void
   onReprocess?: (record: HistoryRecord) => Promise<void> | void
   onEdit?: (id: string, nextText: string) => Promise<void> | void
-  onLearningNotes?: (id: string, notes: string) => Promise<void> | void
+  onLearningNotes?: (id: string, payload: LearningPersistPayload) => Promise<void> | void
   highlight?: string
 }) {
   return (
@@ -747,7 +797,7 @@ function DayGroup({
               onReprocess={onReprocess ? () => onReprocess(record) : undefined}
               onEdit={onEdit ? (nextText) => onEdit(record.id, nextText) : undefined}
               onLearningNotes={
-                onLearningNotes ? (notes) => onLearningNotes(record.id, notes) : undefined
+                onLearningNotes ? (payload) => onLearningNotes(record.id, payload) : undefined
               }
               highlight={highlight}
             />
@@ -755,6 +805,163 @@ function DayGroup({
         </div>
       </CardContent>
     </Card>
+  )
+}
+
+/** 结构化学习内容卡片；空栏目隐藏 */
+function LearningContentView({
+  content,
+  mode,
+  isTranslation,
+}: {
+  content: LearningContentV1
+  mode: LearningCacheV1['mode']
+  isTranslation: boolean
+}) {
+  const translateUi = isTranslation || mode === 'translation'
+  const labels = translateUi
+    ? {
+        summary: '概览',
+        vocabulary: '词汇与用法',
+        grammar: '语法',
+        phrases: '固定表达',
+        pitfalls: '易错点',
+        variants: '表达变体',
+      }
+    : {
+        summary: '修改概览',
+        vocabulary: '词语与术语',
+        grammar: '句式与标点',
+        phrases: '表达习惯',
+        pitfalls: '注意点',
+        variants: '可选说法',
+      }
+
+  const styleLabel = (s: string) => (s === 'casual' ? '更口语' : s === 'formal' ? '更正式' : s)
+
+  return (
+    <div className="space-y-3 border-t border-border/60 pt-2 text-[12px] leading-relaxed">
+      {content.summaryZh.trim() && (
+        <section>
+          <h4 className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-sky-800/80 dark:text-sky-200/80">
+            {labels.summary}
+          </h4>
+          <p className="text-foreground">{content.summaryZh}</p>
+        </section>
+      )}
+
+      {content.vocabulary.length > 0 && (
+        <section>
+          <h4 className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-sky-800/80 dark:text-sky-200/80">
+            {labels.vocabulary}
+          </h4>
+          <ul className="space-y-2">
+            {content.vocabulary.map((item, i) => (
+              <li key={i} className="rounded-md bg-background/60 px-2 py-1.5">
+                <div className="font-medium text-foreground">
+                  {item.expression}
+                  {item.pronunciation && (
+                    <span className="ml-1.5 font-normal text-muted-foreground">/{item.pronunciation}/</span>
+                  )}
+                </div>
+                {item.sourceExpression && (
+                  <div className="text-muted-foreground">← {item.sourceExpression}</div>
+                )}
+                <div>{item.meaningZh}</div>
+                {item.usageZh && <div className="text-muted-foreground">{item.usageZh}</div>}
+                {item.example && (
+                  <div className="mt-0.5 text-muted-foreground">
+                    例：{item.example.text}
+                    {item.example.translationZh ? `（${item.example.translationZh}）` : ''}
+                  </div>
+                )}
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+
+      {content.grammar.length > 0 && (
+        <section>
+          <h4 className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-sky-800/80 dark:text-sky-200/80">
+            {labels.grammar}
+          </h4>
+          <ul className="space-y-2">
+            {content.grammar.map((item, i) => (
+              <li key={i} className="rounded-md bg-background/60 px-2 py-1.5">
+                <div className="font-medium">{item.pattern}</div>
+                <div className="text-muted-foreground">文中：{item.excerpt}</div>
+                <div>{item.explanationZh}</div>
+                {item.example && (
+                  <div className="mt-0.5 text-muted-foreground">
+                    例：{item.example.text}
+                    {item.example.translationZh ? `（${item.example.translationZh}）` : ''}
+                  </div>
+                )}
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+
+      {content.phrases.length > 0 && (
+        <section>
+          <h4 className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-sky-800/80 dark:text-sky-200/80">
+            {labels.phrases}
+          </h4>
+          <ul className="space-y-2">
+            {content.phrases.map((item, i) => (
+              <li key={i} className="rounded-md bg-background/60 px-2 py-1.5">
+                <div className="font-medium">
+                  {item.expression}
+                  {item.pronunciation && (
+                    <span className="ml-1.5 font-normal text-muted-foreground">/{item.pronunciation}/</span>
+                  )}
+                </div>
+                {item.sourceExpression && (
+                  <div className="text-muted-foreground">← {item.sourceExpression}</div>
+                )}
+                <div>{item.meaningZh}</div>
+                {item.usageZh && <div className="text-muted-foreground">{item.usageZh}</div>}
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+
+      {content.pitfalls.length > 0 && (
+        <section>
+          <h4 className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-sky-800/80 dark:text-sky-200/80">
+            {labels.pitfalls}
+          </h4>
+          <ul className="space-y-2">
+            {content.pitfalls.map((item, i) => (
+              <li key={i} className="rounded-md bg-background/60 px-2 py-1.5">
+                <div className="text-amber-800 dark:text-amber-200">{item.issueZh}</div>
+                <div className="text-muted-foreground">{item.adviceZh}</div>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+
+      {content.variants.length > 0 && (
+        <section>
+          <h4 className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-sky-800/80 dark:text-sky-200/80">
+            {labels.variants}
+          </h4>
+          <ul className="space-y-2">
+            {content.variants.map((item, i) => (
+              <li key={i} className="rounded-md bg-background/60 px-2 py-1.5">
+                <div className="text-[11px] font-medium text-muted-foreground">{styleLabel(item.style)}</div>
+                <div className="whitespace-pre-wrap">{item.text}</div>
+                {item.noteZh && <div className="text-muted-foreground">{item.noteZh}</div>}
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+    </div>
   )
 }
 

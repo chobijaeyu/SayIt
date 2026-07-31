@@ -36,6 +36,7 @@ import {
   normalizeCustomThemeActive,
   normalizeCustomThemes,
 } from '@/services/hotwords/model'
+import type { LearningPersistPayload } from '@/services/translationLearning'
 
 const HISTORY_PAGE_SIZE = 100
 
@@ -340,11 +341,15 @@ export default function History() {
 
   const handleEdit = async (id: string, nextText: string) => {
     const editedAt = Date.now()
+    // 文本变了：原子清空学习缓存，避免展示过期讲解
     const patch = {
       llmText: nextText,
       charCount: nextText.length,
       isEmpty: !nextText.trim(),
       manualEditedAt: editedAt,
+      learningNotes: null as string | null,
+      learningNotesAt: null as number | null,
+      learningCache: null as null,
     }
     await updateHistoryRecord(id, patch)
     // 局部更新，避免整页刷新丢失展开态/滚动位置
@@ -352,10 +357,11 @@ export default function History() {
   }
 
   /** 缓存历史「学习」讲解，不触发粘贴、不改变主文本 */
-  const handleLearningNotes = async (id: string, notes: string) => {
+  const handleLearningNotes = async (id: string, payload: LearningPersistPayload) => {
     const patch = {
-      learningNotes: notes,
-      learningNotesAt: Date.now(),
+      learningNotes: payload.learningNotes ?? null,
+      learningNotesAt: payload.learningNotesAt ?? (payload.learningCache ? Date.now() : null),
+      learningCache: payload.learningCache ?? null,
     }
     await updateHistoryRecord(id, patch)
     setRecords((prev) => prev.map((r) => (r.id === id ? { ...r, ...patch } : r)))
@@ -459,6 +465,10 @@ export default function History() {
       aiProvider: meta.aiProvider,
       aiModel: meta.aiModel,
       asrProvider: meta.asrProvider,
+      // 重新识别后原文/结果变了，清空学习缓存
+      learningNotes: null,
+      learningNotesAt: null,
+      learningCache: null,
     })
 
     void loadRecords(debouncedKeyword, visibleCount, favoriteOnly)

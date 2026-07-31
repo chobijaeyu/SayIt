@@ -1,6 +1,7 @@
 // Local storage service — Tauri IPC store
 
 import * as bridge from './bridge'
+import type { LearningCacheV1 } from './translationLearning'
 
 const api = () => bridge
 
@@ -43,9 +44,11 @@ export interface HistoryRecord {
   asrProvider?: string   // 例如 "server" / "doubao" / "sensevoice-small"
   aiProvider?: string    // 例如 "server" / "openai_compat" / "ollama"
   aiModel?: string       // 例如 "deepseek-chat" / "qwen2.5:7b"
-  /** 历史「学习」按钮生成的翻译/润色讲解（中文），不进入粘贴主路径 */
-  learningNotes?: string
-  learningNotesAt?: number
+  /** 历史「学习」旧版纯文本讲解；v1 起同时写 summaryZh 兼容展示 */
+  learningNotes?: string | null
+  learningNotesAt?: number | null
+  /** 结构化学习缓存（LearningCacheV1）；指纹失效后需重新生成 */
+  learningCache?: LearningCacheV1 | null
 }
 
 export interface Stats {

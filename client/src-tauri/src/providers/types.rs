@@ -83,3 +83,18 @@ pub struct CloudPolishRequest {
     #[serde(default)]
     pub system_prompt: Option<String>,
 }
+
+/// 历史「学习」讲解请求：与 polish 隔离，可用更高 max_tokens / JSON 输出偏好
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CloudLearningRequest {
+    pub text: String,
+    pub ai_config: AiProviderConfig,
+    #[serde(default)]
+    pub system_prompt: Option<String>,
+    /// 默认 2048，避免与主路径 polish 的 1024 互相牵制
+    #[serde(default)]
+    pub max_tokens: Option<u32>,
+    /// 尽量要求 JSON object（OpenAI/OpenRouter 支持时）
+    #[serde(default)]
+    pub prefer_json: Option<bool>,
+}

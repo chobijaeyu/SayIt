@@ -197,8 +197,17 @@ impl Storage {
         if let Some(kw) = keyword {
             let trimmed = kw.trim().to_lowercase();
             if !trimmed.is_empty() {
-                where_clauses.push(format!("LOWER(raw_json) LIKE ?{}", param_values.len() + 1));
-                param_values.push(Box::new(format!("%{}%", trimmed)));
+                // 只搜 asrText / llmText，避免命中 learningCache、模型名等噪声字段
+                let p1 = param_values.len() + 1;
+                let p2 = param_values.len() + 2;
+                where_clauses.push(format!(
+                    "(LOWER(COALESCE(json_extract(raw_json, '$.asrText'), '')) LIKE ?{} \
+                     OR LOWER(COALESCE(json_extract(raw_json, '$.llmText'), '')) LIKE ?{})",
+                    p1, p2
+                ));
+                let pattern = format!("%{}%", trimmed);
+                param_values.push(Box::new(pattern.clone()));
+                param_values.push(Box::new(pattern));
             }
         }
 
@@ -246,8 +255,16 @@ impl Storage {
         if let Some(kw) = keyword {
             let trimmed = kw.trim().to_lowercase();
             if !trimmed.is_empty() {
-                where_clauses.push(format!("LOWER(raw_json) LIKE ?{}", param_values.len() + 1));
-                param_values.push(Box::new(format!("%{}%", trimmed)));
+                let p1 = param_values.len() + 1;
+                let p2 = param_values.len() + 2;
+                where_clauses.push(format!(
+                    "(LOWER(COALESCE(json_extract(raw_json, '$.asrText'), '')) LIKE ?{} \
+                     OR LOWER(COALESCE(json_extract(raw_json, '$.llmText'), '')) LIKE ?{})",
+                    p1, p2
+                ));
+                let pattern = format!("%{}%", trimmed);
+                param_values.push(Box::new(pattern.clone()));
+                param_values.push(Box::new(pattern));
             }
         }
 

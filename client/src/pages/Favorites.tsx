@@ -4,7 +4,15 @@ import HistoryRecordList from '@/components/history/HistoryRecordList'
 import { Button } from '@/components/ui/button'
 import { Tooltip } from '@/components/ui/tooltip'
 import { exportFavorites } from '@/services/exports'
-import { countHistory, deleteHistory, listHistory, setHistoryFavorite, type HistoryRecord } from '@/services/store'
+import {
+  countHistory,
+  deleteHistory,
+  listHistory,
+  setHistoryFavorite,
+  updateHistoryRecord,
+  type HistoryRecord,
+} from '@/services/store'
+import type { LearningPersistPayload } from '@/services/translationLearning'
 
 const FAVORITES_PAGE_SIZE = 100
 
@@ -41,6 +49,16 @@ export default function Favorites() {
     void loadRecords(visibleCount)
   }
 
+  const handleLearningNotes = async (id: string, payload: LearningPersistPayload) => {
+    const patch = {
+      learningNotes: payload.learningNotes ?? null,
+      learningNotesAt: payload.learningNotesAt ?? (payload.learningCache ? Date.now() : null),
+      learningCache: payload.learningCache ?? null,
+    }
+    await updateHistoryRecord(id, patch)
+    setRecords((prev) => prev.map((r) => (r.id === id ? { ...r, ...patch } : r)))
+  }
+
   const handleExport = async () => {
     const result = await exportFavorites()
     setExportMessage(result.canceled ? '已取消导出。' : `已保存到 ${result.filePath}`)
@@ -72,6 +90,7 @@ export default function Favorites() {
         records={records}
         onDelete={handleDelete}
         onToggleFavorite={handleToggleFavorite}
+        onLearningNotes={handleLearningNotes}
         emptyText="还没有收藏记录，去历史记录里点一下星标吧。"
       />
 
