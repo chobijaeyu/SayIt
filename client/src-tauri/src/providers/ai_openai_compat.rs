@@ -54,13 +54,23 @@ pub async fn polish(
     let client = reqwest::Client::new();
     let start = Instant::now();
 
+    let api_key = config.api_key.trim();
+    if api_key.is_empty() {
+        return Err("API Key 为空".into());
+    }
     let mut req = client
         .post(&url)
-        .header("Authorization", format!("Bearer {}", config.api_key))
+        .header("Authorization", format!("Bearer {}", api_key))
         .header("Content-Type", "application/json");
     // 小米 MiMo 规范鉴权头为 api-key（同时兼容 Bearer），两个都带最稳妥
     if config.provider == "mimo" {
-        req = req.header("api-key", config.api_key.clone());
+        req = req.header("api-key", api_key.to_string());
+    }
+    // OpenRouter 官方/企业代理：可选归属头（不影响鉴权，部分网关会校验 Referer）
+    if url.contains("openrouter.ai") || config.api_url.to_ascii_lowercase().contains("openrouter") {
+        req = req
+            .header("HTTP-Referer", "https://github.com/chobijaeyu/SayIt")
+            .header("X-OpenRouter-Title", "SayIt");
     }
     let resp = req
         .json(&body)
@@ -74,7 +84,12 @@ pub async fn polish(
     if !resp.status().is_success() {
         let status = resp.status();
         let body_text = resp.text().await.unwrap_or_default();
-        return Err(format!("API 返回错误 {}: {}", status, truncate(&body_text, 200)));
+        return Err(format!(
+            "API 返回错误 {} (请求 {})：{}",
+            status,
+            url,
+            truncate_chars(&body_text, 200)
+        ));
     }
 
     let data: serde_json::Value = resp
@@ -129,12 +144,26 @@ pub async fn test_connection(config: &AiProviderConfig) -> TestResult {
     let client = reqwest::Client::new();
     let start = Instant::now();
 
+    let api_key = config.api_key.trim();
+    if api_key.is_empty() {
+        return TestResult {
+            ok: false,
+            message: "API Key 为空".into(),
+            elapsed_ms: 0,
+            detail: format!("请求地址: {}", url),
+        };
+    }
     let mut req = client
         .post(&url)
-        .header("Authorization", format!("Bearer {}", config.api_key))
+        .header("Authorization", format!("Bearer {}", api_key))
         .header("Content-Type", "application/json");
     if config.provider == "mimo" {
-        req = req.header("api-key", config.api_key.clone());
+        req = req.header("api-key", api_key.to_string());
+    }
+    if url.contains("openrouter.ai") || config.api_url.to_ascii_lowercase().contains("openrouter") {
+        req = req
+            .header("HTTP-Referer", "https://github.com/chobijaeyu/SayIt")
+            .header("X-OpenRouter-Title", "SayIt");
     }
     let result = req
         .json(&body)
@@ -158,8 +187,8 @@ pub async fn test_connection(config: &AiProviderConfig) -> TestResult {
                 .to_string();
             let reply = strip_thinking(&raw_reply);
             let detail = format!(
-                "耗时: {}ms\n模型: {}\n发送: system=\"{}\" user=\"{}\"\n回复: {}",
-                elapsed_ms, config.model, system_prompt, user_prompt,
+                "耗时: {}ms\n模型: {}\n请求地址: {}\n发送: system=\"{}\" user=\"{}\"\n回复: {}",
+                elapsed_ms, config.model, url, system_prompt, user_prompt,
                 if reply.is_empty() { "(空)" } else { &reply }
             );
             TestResult {
@@ -174,9 +203,12 @@ pub async fn test_connection(config: &AiProviderConfig) -> TestResult {
             let body = resp.text().await.unwrap_or_default();
             TestResult {
                 ok: false,
-                message: format!("API 返回 {}: {}", status, truncate(&body, 100)),
+                message: format!("API 返回 {}: {}", status, truncate_chars(&body, 120)),
                 elapsed_ms,
-                detail: format!("模型: {}\n请求地址: {}", config.model, url),
+                detail: format!(
+                    "模型: {}\n请求地址: {}\n提示: OpenRouter 地址应类似 https://openrouter.ai/api 或企业代理的 /api 根路径；模型用 deepseek/deepseek-v4-flash 这类 slug，且供应商选「OpenAI 兼容」而非「DeepSeek」直连。",
+                    config.model, url
+                ),
             }
         }
         Err(e) => TestResult {
@@ -213,18 +245,39 @@ fn describe_reqwest_error(e: &reqwest::Error) -> String {
     raw
 }
 
-/// 规范化 base URL
+/// 规范化 base URL，得到可拼 `/chat/completions` 的前缀。
+///
+/// 规则：
+/// - 已以 `/v1` / `/v3` 等版本结尾 → 原样
+/// - 火山方舟 / 豆包 host 且以 `/api` 结尾 → `/api/v3`（豆包专用）
+/// - 其它以 `/api` 结尾（含 OpenRouter 官方与企业代理）→ `/api/v1`
+/// - 其它 → 补 `/v1`
 fn normalize_base_url(url: &str) -> String {
     let trimmed = url.trim().trim_end_matches('/');
-    // 已经以 /v1 或 /v3 等版本路径结尾
-    if trimmed.ends_with("/v1") || trimmed.ends_with("/v3") {
-        trimmed.to_string()
-    } else if trimmed.ends_with("/api") {
-        // 豆包等：https://ark.cn-beijing.volces.com/api → 加 /v3
-        format!("{}/v3", trimmed)
-    } else {
-        format!("{}/v1", trimmed)
+    if trimmed.is_empty() {
+        return trimmed.to_string();
     }
+    // 已经以版本路径结尾
+    if trimmed.ends_with("/v1")
+        || trimmed.ends_with("/v1beta")
+        || trimmed.ends_with("/v2")
+        || trimmed.ends_with("/v3")
+    {
+        return trimmed.to_string();
+    }
+    // 豆包/火山方舟：…/api → …/api/v3（绝不能误伤 OpenRouter）
+    let lower = trimmed.to_ascii_lowercase();
+    let is_volc =
+        lower.contains("volces.com") || lower.contains("volcengine.com") || lower.contains("ark.cn-");
+    if trimmed.ends_with("/api") {
+        if is_volc {
+            return format!("{}/v3", trimmed);
+        }
+        // OpenRouter 官方 https://openrouter.ai/api → /api/v1
+        // 企业 OpenRouter 代理 https://xxx.company.com/api → /api/v1
+        return format!("{}/v1", trimmed);
+    }
+    format!("{}/v1", trimmed)
 }
 
 /// 从 chat completion 响应中提取文本
@@ -274,10 +327,48 @@ fn strip_thinking(text: &str) -> String {
     cleaned.to_string()
 }
 
-fn truncate(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
-        s.to_string()
-    } else {
-        format!("{}...", &s[..max_len])
+fn truncate_chars(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(max_chars).collect();
+    out.push('…');
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_base_url;
+
+    #[test]
+    fn openrouter_api_gets_v1_not_v3() {
+        assert_eq!(
+            normalize_base_url("https://openrouter.ai/api"),
+            "https://openrouter.ai/api/v1"
+        );
+        assert_eq!(
+            normalize_base_url("https://openrouter.ai/api/"),
+            "https://openrouter.ai/api/v1"
+        );
+        assert_eq!(
+            normalize_base_url("https://or.company.com/api"),
+            "https://or.company.com/api/v1"
+        );
+    }
+
+    #[test]
+    fn volc_api_still_gets_v3() {
+        assert_eq!(
+            normalize_base_url("https://ark.cn-beijing.volces.com/api"),
+            "https://ark.cn-beijing.volces.com/api/v3"
+        );
+    }
+
+    #[test]
+    fn openai_root_gets_v1() {
+        assert_eq!(
+            normalize_base_url("https://api.openai.com"),
+            "https://api.openai.com/v1"
+        );
     }
 }

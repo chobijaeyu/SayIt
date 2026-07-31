@@ -156,10 +156,19 @@ pub async fn transcribe(
 
     let client = reqwest::Client::new();
     let start = Instant::now();
+    let api_key = config.api_key.trim();
 
-    let resp = client
+    // 注意：先设 Authorization，再 multipart（reqwest 会保留鉴权头并改写 Content-Type boundary）
+    let mut req = client
         .post(&url)
-        .header("Authorization", format!("Bearer {}", config.api_key.trim()))
+        .header("Authorization", format!("Bearer {}", api_key));
+    // OpenRouter 企业网关有时对 STT 也要求 Referer；无害可带
+    if url.contains("openrouter") {
+        req = req
+            .header("HTTP-Referer", "https://github.com/chobijaeyu/SayIt")
+            .header("X-OpenRouter-Title", "SayIt");
+    }
+    let resp = req
         .multipart(form)
         .timeout(std::time::Duration::from_secs(60))
         .send()
@@ -172,8 +181,9 @@ pub async fn transcribe(
 
     if !status.is_success() {
         return Err(format!(
-            "ASR 错误 {}: {}",
+            "ASR 错误 {} (请求 {})：{}",
             status,
+            url,
             extract_error_message(&body)
         ));
     }
@@ -244,9 +254,16 @@ pub async fn test_connection(config: &AsrProviderConfig) -> TestResult {
         .part("file", file_part);
 
     let client = reqwest::Client::new();
-    let result = client
+    let api_key = config.api_key.trim();
+    let mut req = client
         .post(&url)
-        .header("Authorization", format!("Bearer {}", config.api_key.trim()))
+        .header("Authorization", format!("Bearer {}", api_key));
+    if url.contains("openrouter") {
+        req = req
+            .header("HTTP-Referer", "https://github.com/chobijaeyu/SayIt")
+            .header("X-OpenRouter-Title", "SayIt");
+    }
+    let result = req
         .multipart(form)
         .timeout(std::time::Duration::from_secs(30))
         .send()
@@ -276,11 +293,17 @@ pub async fn test_connection(config: &AsrProviderConfig) -> TestResult {
         Ok(resp) => {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
+            let mut hint = String::new();
+            if status.as_u16() == 401 {
+                hint = "\n提示: 401 多为 Key 未带上或企业网关不认；确认 Key 已粘贴、供应商为 OpenAI 兼容、地址为 …/api（不要填控制台网页 URL）。企业代理若未开通 /audio/transcriptions 也会失败。".into();
+            } else if status.as_u16() == 404 {
+                hint = "\n提示: 404 多为 URL 拼错或企业 OpenRouter 未开通 STT；确认最终请求含 /v1/audio/transcriptions。".into();
+            }
             TestResult {
                 ok: false,
                 message: format!("API 返回 {}: {}", status, extract_error_message(&body)),
                 elapsed_ms,
-                detail: format!("模型: {}\n请求地址: {}", model, url),
+                detail: format!("模型: {}\n请求地址: {}{}", model, url, hint),
             }
         }
         Err(e) => TestResult {
