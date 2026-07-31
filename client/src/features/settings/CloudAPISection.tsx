@@ -7,16 +7,40 @@ import { Eye, EyeOff, ExternalLink, AlertTriangle } from 'lucide-react'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { getSetting, setSetting } from '@/services/store'
+import { asrKeyGroup } from '@/services/cloudAsrConfig'
 import { isQwenOmniProvider, resolveQwenOmniModel } from '@/lib/asrModels'
 
 const ASR_PROVIDERS = [
-  { value: 'doubao_v2', label: '豆包 ASR（Doubao-Seed-ASR-2.0）' },
+  { value: 'openai_compat', label: 'OpenAI 兼容（OpenAI / OpenRouter / 自定义）' },
+  { value: 'doubao_v2', label: '豆包 ASR（Doubao-Seed-ASR-2.0，中文质量兜底）' },
   { value: 'qwen', label: '千问 ASR（qwen3-asr-flash）' },
   { value: 'qwen_realtime', label: '千问 ASR 流式（qwen3-asr-flash-realtime）' },
   { value: 'qwen_omni_35_plus', label: '千问 3.5 Omni Plus（qwen3.5-omni-plus，ASR+AI）' },
   { value: 'qwen_omni_35_flash', label: '千问 3.5 Omni Flash（qwen3.5-omni-flash，ASR+AI）' },
   { value: 'mimo', label: '小米 MiMo（mimo-v2.5-asr）' },
 ]
+
+/** OpenAI 兼容 ASR 的 UI preset（只预填 URL/模型，Rust 仍是单一 openai_compat） */
+const OPENAI_ASR_PRESETS = [
+  {
+    id: 'openai',
+    label: 'OpenAI',
+    apiUrl: 'https://api.openai.com',
+    model: 'gpt-4o-mini-transcribe',
+  },
+  {
+    id: 'openrouter',
+    label: 'OpenRouter',
+    apiUrl: 'https://openrouter.ai/api',
+    model: 'openai/gpt-4o-mini-transcribe',
+  },
+  {
+    id: 'custom',
+    label: '自定义',
+    apiUrl: '',
+    model: '',
+  },
+] as const
 
 interface TestResult {
   ok: boolean
@@ -70,13 +94,6 @@ const OMNI_PROMPT_PRESETS = [
   { id: 'polish', label: '口语润色', prompt: OMNI_PROMPT_POLISH },
 ] as const
 
-// 供应商按平台分组，同平台共享 API Key
-function asrKeyGroup(provider: string): string {
-  if (provider === 'doubao_v2' || provider === 'doubao') return 'doubao'
-  if (provider === 'mimo') return 'mimo' // 小米 MiMo 用独立 api-key
-  return 'qwen' // qwen, qwen_omni_flash, qwen_omni_plus 都用百炼 key
-}
-
 /** 根据供应商检查 API Key 格式，返回提示文字（空字符串表示格式正常） */
 function checkAsrKeyFormat(provider: string, key: string): string {
   const k = key.trim()
@@ -87,8 +104,8 @@ function checkAsrKeyFormat(provider: string, key: string): string {
     if (/\s/.test(k)) {
       return '豆包 Access Token 不应包含空格或换行，请确认是否粘贴了多余字符'
     }
-  } else if (provider === 'mimo') {
-    // 小米 MiMo API Key 无公开固定格式约定，不做格式校验
+  } else if (provider === 'mimo' || provider === 'openai_compat') {
+    // OpenAI / OpenRouter / MiMo：格式不强制
   } else {
     // 百炼平台 API Key：通常以 sk- 开头
     if (!/^sk-/.test(k)) {
@@ -116,6 +133,9 @@ export default function CloudAPISection() {
   const [asrProvider, setAsrProvider] = useState('doubao_v2')
   const [asrApiKey, setAsrApiKey] = useState('')
   const [asrAppId, setAsrAppId] = useState('')
+  const [asrApiUrl, setAsrApiUrl] = useState('')
+  const [asrModel, setAsrModel] = useState('')
+  const [openaiPreset, setOpenaiPreset] = useState<string>('openai')
   const [asrTesting, setAsrTesting] = useState(false)
   const [asrMessage, setAsrMessage] = useState('')
   const [omniSystemPrompt, setOmniSystemPrompt] = useState(DEFAULT_OMNI_PROMPT)
@@ -126,6 +146,17 @@ export default function CloudAPISection() {
     const group = asrKeyGroup(provider)
     setAsrApiKey(await getSetting(`cloudAsr.${group}.apiKey`, '') as string)
     setAsrAppId(await getSetting(`cloudAsr.${group}.appId`, '') as string)
+    if (provider === 'openai_compat') {
+      const url = await getSetting('cloudAsr.openai_compat.apiUrl', '') as string
+      const model = await getSetting('cloudAsr.openai_compat.model', '') as string
+      setAsrApiUrl(url || OPENAI_ASR_PRESETS[0].apiUrl)
+      setAsrModel(model || OPENAI_ASR_PRESETS[0].model)
+      const matched = OPENAI_ASR_PRESETS.find((p) => p.apiUrl && p.apiUrl === url)
+      setOpenaiPreset(matched?.id ?? (url ? 'custom' : 'openai'))
+    } else {
+      setAsrApiUrl('')
+      setAsrModel('')
+    }
   }
 
   useEffect(() => {
@@ -155,6 +186,14 @@ export default function CloudAPISection() {
     void setSetting('cloudAsr.qwen.workspaceId', v.trim())
   }
 
+  function applyOpenaiPreset(presetId: string) {
+    setOpenaiPreset(presetId)
+    const p = OPENAI_ASR_PRESETS.find((x) => x.id === presetId)
+    if (!p) return
+    if (p.apiUrl) setAsrApiUrl(p.apiUrl)
+    if (p.model) setAsrModel(p.model)
+  }
+
   // 切换供应商时自动保存 provider 并加载对应平台的 key，同步到全局 key
   function handleAsrProviderChange(newProvider: string) {
     setAsrProvider(newProvider)
@@ -170,6 +209,17 @@ export default function CloudAPISection() {
       setAsrAppId(groupAppId)
       await setSetting('cloudAsr.apiKey', groupKey)
       await setSetting('cloudAsr.appId', groupAppId)
+      if (newProvider === 'openai_compat') {
+        const url = await getSetting('cloudAsr.openai_compat.apiUrl', '') as string
+        const model = await getSetting('cloudAsr.openai_compat.model', '') as string
+        setAsrApiUrl(url || OPENAI_ASR_PRESETS[0].apiUrl)
+        setAsrModel(model || OPENAI_ASR_PRESETS[0].model)
+        const matched = OPENAI_ASR_PRESETS.find((p) => p.apiUrl && p.apiUrl === url)
+        setOpenaiPreset(matched?.id ?? (url ? 'custom' : 'openai'))
+      } else {
+        setAsrApiUrl('')
+        setAsrModel('')
+      }
     })()
   }
 
@@ -186,6 +236,13 @@ export default function CloudAPISection() {
       setSetting('cloudAsr.apiKey', asrApiKey),
       setSetting('cloudAsr.appId', asrAppId),
     ]
+    if (asrProvider === 'openai_compat') {
+      savePromises.push(
+        setSetting('cloudAsr.openai_compat.apiUrl', asrApiUrl.trim()),
+        setSetting('cloudAsr.openai_compat.apiKey', asrApiKey),
+        setSetting('cloudAsr.openai_compat.model', asrModel.trim()),
+      )
+    }
     if (asrProvider.startsWith('qwen_omni')) {
       savePromises.push(setSetting('cloudAsr.omniSystemPrompt', omniSystemPrompt))
     }
@@ -201,6 +258,10 @@ export default function CloudAPISection() {
           provider: isQwenOmni ? 'qwen_omni' : asrProvider,
           api_key: asrApiKey,
           app_id: asrAppId,
+          ...(asrProvider === 'openai_compat' && {
+            api_url: asrApiUrl.trim(),
+            model: asrModel.trim(),
+          }),
           ...(isQwenOmni && { extra: { model: qwenOmniModel } }),
         },
       })
@@ -220,7 +281,7 @@ export default function CloudAPISection() {
       <CardContent className="p-6">
         <h2 className="mb-1 text-lg font-semibold">语音识别 (ASR)</h2>
           <p className="mb-4 text-xs text-muted-foreground">
-            推荐使用豆包 ASR 进行语音识别，准确率高，速度快。
+            ASR 与下方 AI 润色独立配置，可任意混搭。国外网络优先 OpenAI 兼容；中文效果不够时再切豆包/千问。
           </p>
           <div className="space-y-3">
             <div>
@@ -236,6 +297,56 @@ export default function CloudAPISection() {
               </select>
             </div>
 
+            {asrProvider === 'openai_compat' && (
+              <>
+                <div>
+                  <label className="mb-1 block text-sm text-muted-foreground">服务预设</label>
+                  <div className="flex flex-wrap gap-1.5">
+                    {OPENAI_ASR_PRESETS.map((p) => (
+                      <button
+                        key={p.id}
+                        type="button"
+                        onClick={() => applyOpenaiPreset(p.id)}
+                        className={`rounded-md border px-2.5 py-1 text-xs transition-colors ${
+                          openaiPreset === p.id
+                            ? 'border-primary bg-primary/10 text-primary'
+                            : 'border-input-border text-muted-foreground hover:border-primary/50'
+                        }`}
+                      >
+                        {p.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <div>
+                  <label className="mb-1 block text-sm text-muted-foreground">API URL</label>
+                  <input
+                    value={asrApiUrl}
+                    onChange={(e) => {
+                      setAsrApiUrl(e.target.value)
+                      setOpenaiPreset('custom')
+                    }}
+                    placeholder="https://api.openai.com 或 https://openrouter.ai/api"
+                    className={inputClass}
+                  />
+                </div>
+                <div>
+                  <label className="mb-1 block text-sm text-muted-foreground">模型</label>
+                  <input
+                    value={asrModel}
+                    onChange={(e) => {
+                      setAsrModel(e.target.value)
+                      setOpenaiPreset('custom')
+                    }}
+                    placeholder="gpt-4o-mini-transcribe 或 openai/whisper-1"
+                    className={inputClass}
+                  />
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    模型名原样发送。OpenAI 用官方 id；OpenRouter 通常带厂商前缀。
+                  </p>
+                </div>
+              </>
+            )}
 
             {/* 只有豆包需要 App ID；千问（含流式/Omni）和 MiMo 只需要 API Key */}
             {asrProvider === 'doubao_v2' && (
@@ -264,7 +375,15 @@ export default function CloudAPISection() {
                   <PasswordInput
                     value={asrApiKey}
                     onChange={setAsrApiKey}
-                    placeholder={asrProvider === 'doubao_v2' ? '输入火山引擎 Access Token' : asrProvider === 'mimo' ? '输入小米 MiMo API Key' : '输入百炼平台 API Key'}
+                    placeholder={
+                      asrProvider === 'doubao_v2'
+                        ? '输入火山引擎 Access Token'
+                        : asrProvider === 'mimo'
+                          ? '输入小米 MiMo API Key'
+                          : asrProvider === 'openai_compat'
+                            ? '输入 OpenAI / OpenRouter API Key'
+                            : '输入百炼平台 API Key'
+                    }
                     className={inputClass}
                   />
                 </div>
@@ -273,7 +392,11 @@ export default function CloudAPISection() {
                   size="sm"
                   className="h-9 shrink-0"
                   onClick={() => void saveAndTestAsr()}
-                  disabled={asrTesting || !asrApiKey}
+                  disabled={
+                    asrTesting
+                    || !asrApiKey
+                    || (asrProvider === 'openai_compat' && (!asrApiUrl.trim() || !asrModel.trim()))
+                  }
                 >
                   {asrTesting ? '测试中...' : '保存'}
                 </Button>

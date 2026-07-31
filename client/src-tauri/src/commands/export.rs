@@ -94,11 +94,8 @@ pub async fn save_full_export(
         let _ = fs::create_dir_all(parent);
     }
 
-    // 收集音频文件列表
-    let audio_dir = dirs::data_local_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("com.sayit.app")
-        .join("audio");
+    // 收集音频文件列表（仅 app audio 目录，禁止扫任意路径）
+    let audio_dir = crate::path_guard::audio_dir();
 
     let mut audio_files: Vec<std::path::PathBuf> = Vec::new();
     if audio_dir.exists() {

@@ -70,44 +70,21 @@ export default function AsrTestSection({ workMode }: { workMode: WorkMode }) {
         }
         pcmB64 = btoa(pcmB64)
 
-        const asrProvider = await getSetting('cloudAsr.provider', 'doubao_v2') as string
-        const asrApiKey = await getSetting('cloudAsr.apiKey', '') as string
-        const asrAppId = await getSetting('cloudAsr.appId', '') as string
-
-        const isQwenOmni = asrProvider.startsWith('qwen_omni')
-        const qwenOmniModel = asrProvider === 'qwen_omni_plus'
-          ? 'qwen3.5-omni-plus-realtime'
-          : asrProvider === 'qwen_omni_35_plus'
-            ? 'qwen3.5-omni-plus-realtime'
-            : asrProvider === 'qwen_omni_35_flash'
-              ? 'qwen3.5-omni-flash-realtime'
-              : asrProvider === 'qwen_omni_flash'
-                ? 'qwen3-omni-flash-realtime'
-                : asrProvider === 'qwen_omni_turbo'
-                  ? 'qwen-omni-turbo-realtime'
-                  : undefined
-        let omniExtra: Record<string, unknown> | undefined
-        if (isQwenOmni) {
-          const savedPrompt = await getSetting('cloudAsr.omniSystemPrompt', '') as string
-          omniExtra = { model: qwenOmniModel, instructions: savedPrompt || undefined }
-        }
+        const { buildCloudAsrConfig } = await import('@/services/cloudAsrConfig')
+        const { providerKey: asrProvider, config: asrConfig, isQwenOmni } = await buildCloudAsrConfig()
 
         const start = performance.now()
         const r = await invoke<{ text: string; elapsed_ms: number }>('cloud_transcribe', {
           request: {
             audio_b64: pcmB64,
             sample_rate: 16000,
-            asr_config: {
-              provider: isQwenOmni ? 'qwen_omni' : asrProvider,
-              api_key: asrApiKey,
-              app_id: asrAppId,
-              ...(omniExtra && { extra: omniExtra }),
-            },
+            asr_config: asrConfig,
           },
         })
         const totalMs = Math.round(performance.now() - start)
         // 映射内部 key 到实际模型 ID
         const ASR_MODEL_ID_MAP: Record<string, string> = {
+          openai_compat: asrConfig.model || 'openai_compat',
           doubao_v2: 'Doubao-Seed-ASR-2.0',
           qwen: 'qwen3-asr-flash',
           mimo: 'mimo-v2.5-asr',
@@ -117,8 +94,11 @@ export default function AsrTestSection({ workMode }: { workMode: WorkMode }) {
           qwen_omni_turbo: 'qwen-omni-turbo-realtime',
           qwen_omni_plus: 'qwen3.5-omni-plus-realtime',
         }
+        const omniModel = isQwenOmni
+          ? (asrConfig.extra?.model as string | undefined)
+          : undefined
         const modelDisplay = isQwenOmni
-          ? (qwenOmniModel || asrProvider)
+          ? (omniModel || asrProvider)
           : (ASR_MODEL_ID_MAP[asrProvider] || asrProvider)
         setResult({ text: r.text, asrMs: totalMs, llmMs: 0, mode: '云 API', model: modelDisplay, audioDurationSec })
       } else {

@@ -27,10 +27,7 @@ pub fn collect_settings(storage: State<Storage>) -> Result<Value, String> {
 // ─── Diagnostics Preview ───
 
 fn log_dir() -> std::path::PathBuf {
-    dirs::data_local_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("com.sayit.app")
-        .join("logs")
+    crate::path_guard::logs_dir()
 }
 
 #[derive(Deserialize)]
@@ -309,14 +306,15 @@ struct DiagImage {
 pub fn create_diagnostics_zip(data: Value) -> Result<String, String> {
     let req: DiagnosticsZipRequest = serde_json::from_value(data).map_err(|e| e.to_string())?;
 
-    let diag_dir = dirs::data_local_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("com.sayit.app")
-        .join("diagnostics");
+    let diag_dir = crate::path_guard::diagnostics_dir();
     std::fs::create_dir_all(&diag_dir).map_err(|e| e.to_string())?;
 
     let ts = chrono::Local::now().format("%Y%m%d-%H%M%S");
-    let zip_path = diag_dir.join(format!("diagnostics-{}.zip", ts));
+    // 文件名仅时间戳数字与连字符，经 resolve_under 保证落在 diagnostics 内
+    let zip_path = crate::path_guard::resolve_under(
+        &diag_dir,
+        format!("diagnostics-{}.zip", ts),
+    )?;
 
     let file = std::fs::File::create(&zip_path).map_err(|e| e.to_string())?;
     let mut zip = zip::ZipWriter::new(file);
@@ -389,22 +387,49 @@ pub fn create_diagnostics_zip(data: Value) -> Result<String, String> {
 
 #[tauri::command]
 pub fn read_diagnostics_zip(path: String) -> Result<Option<Vec<u8>>, String> {
-    let path = std::path::PathBuf::from(&path);
-    if !path.exists() {
-        return Ok(None);
-    }
+    use crate::path_guard::{diagnostics_dir, require_existing_under};
+    let path = match require_existing_under(&diagnostics_dir(), &path) {
+        Ok(p) => p,
+        Err(_) => return Ok(None),
+    };
     let data = std::fs::read(&path).map_err(|e| e.to_string())?;
     Ok(Some(data))
 }
 
 #[tauri::command]
 pub fn copy_diagnostics_zip(source: String, destination: String) -> Result<(), String> {
-    let src = std::path::PathBuf::from(&source);
-    if !src.exists() {
-        return Err("诊断文件不存在".to_string());
+    use crate::path_guard::{diagnostics_dir, require_existing_under, sanitize_basename};
+    // 源文件必须在应用 diagnostics 目录内（防任意读）
+    let src = require_existing_under(&diagnostics_dir(), &source)?;
+
+    // 目标：仅允许「目录由用户选定 + 安全文件名」——禁止 destination 带 .. 指到源外偷换
+    let dest = std::path::PathBuf::from(&destination);
+    let dest_name = dest
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| "非法目标路径".to_string())?;
+    let safe_name = sanitize_basename(dest_name)?;
+    let dest_parent = dest
+        .parent()
+        .ok_or_else(|| "非法目标路径：无父目录".to_string())?;
+    // 父目录必须已存在（由系统文件对话框创建/选择），且自身不含 .. 逃逸意图
+    if dest_parent
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return Err("非法目标路径".into());
     }
-    std::fs::copy(&src, &destination).map_err(|e| format!("复制失败: {}", e))?;
-    // 清理临时文件
+    if !dest_parent.exists() {
+        return Err("目标目录不存在".into());
+    }
+    let dest_parent = std::fs::canonicalize(dest_parent)
+        .map_err(|e| format!("解析目标目录失败: {}", e))?;
+    // 禁止写回应用数据目录外的「伪装」：允许用户下载目录等任意已存在父目录，
+    // 但文件名必须是安全 basename，最终路径 = canonicalize(parent)/safe_name
+    let final_dest = dest_parent.join(safe_name);
+
+    std::fs::copy(&src, &final_dest).map_err(|e| format!("复制失败: {}", e))?;
+    // 清理临时文件（仍在 diagnostics 沙箱内）
     let _ = std::fs::remove_file(&src);
     Ok(())
 }

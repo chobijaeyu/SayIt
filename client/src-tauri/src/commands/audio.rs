@@ -1,21 +1,16 @@
 use base64::{engine::general_purpose::STANDARD, Engine};
 use std::fs;
-use std::path::PathBuf;
-
-fn audio_dir() -> PathBuf {
-    let base = dirs::data_local_dir().unwrap_or_else(|| PathBuf::from("."));
-    base.join("com.sayit.app").join("audio")
-}
+use crate::path_guard::{audio_dir, audio_wav_path, require_existing_under};
 
 #[tauri::command]
 pub fn save_audio_file(id: String, wav_base64: String) -> Result<String, String> {
-    let dir = audio_dir();
-    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-
+    let path = audio_wav_path(&id)?;
     let bytes = STANDARD.decode(&wav_base64).map_err(|e| e.to_string())?;
-    let path = dir.join(format!("{}.wav", id));
+    // 限制单文件体积，防止恶意前端灌盘（约 100MB）
+    if bytes.len() > 100 * 1024 * 1024 {
+        return Err("音频过大".into());
+    }
     fs::write(&path, bytes).map_err(|e| e.to_string())?;
-
     Ok(path.to_string_lossy().to_string())
 }
 
@@ -23,10 +18,12 @@ pub fn save_audio_file(id: String, wav_base64: String) -> Result<String, String>
 /// 避免前端拼 WAV + base64 编码的开销。
 #[tauri::command]
 pub fn save_pcm_as_wav(id: String, pcm_base64: String, sample_rate: Option<u32>) -> Result<String, String> {
-    let dir = audio_dir();
-    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let path = audio_wav_path(&id)?;
 
     let pcm = STANDARD.decode(&pcm_base64).map_err(|e| e.to_string())?;
+    if pcm.len() > 100 * 1024 * 1024 {
+        return Err("音频过大".into());
+    }
     let sr = sample_rate.unwrap_or(16000);
     let data_len = pcm.len() as u32;
 
@@ -47,27 +44,31 @@ pub fn save_pcm_as_wav(id: String, pcm_base64: String, sample_rate: Option<u32>)
     wav.extend_from_slice(&data_len.to_le_bytes());
     wav.extend_from_slice(&pcm);
 
-    let path = dir.join(format!("{}.wav", id));
     fs::write(&path, &wav).map_err(|e| e.to_string())?;
-
     Ok(path.to_string_lossy().to_string())
 }
 
 #[tauri::command]
 pub fn read_audio_file(file_path: String) -> Result<Option<String>, String> {
-    let path = PathBuf::from(&file_path);
-    if !path.exists() {
-        return Ok(None);
-    }
+    let base = audio_dir();
+    let path = match require_existing_under(&base, &file_path) {
+        Ok(p) => p,
+        Err(_) => return Ok(None), // 不存在或越界：对调用方表现为无文件，不泄露是否存在系统路径
+    };
     let bytes = fs::read(&path).map_err(|e| e.to_string())?;
     Ok(Some(STANDARD.encode(&bytes)))
 }
 
 #[tauri::command]
 pub fn delete_audio_file(file_path: String) -> Result<(), String> {
-    let path = PathBuf::from(&file_path);
-    if path.exists() {
-        fs::remove_file(&path).map_err(|e| e.to_string())?;
+    let base = audio_dir();
+    match require_existing_under(&base, &file_path) {
+        Ok(path) => {
+            fs::remove_file(&path).map_err(|e| e.to_string())?;
+            Ok(())
+        }
+        // 越界直接报错，避免被当成「已删除」
+        Err(e) if e.contains("越界") => Err(e),
+        Err(_) => Ok(()), // 不存在：幂等成功
     }
-    Ok(())
 }

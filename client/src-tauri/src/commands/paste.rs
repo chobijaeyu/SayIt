@@ -146,7 +146,15 @@ fn inject_to_clipboard(text: &str) -> Result<(), String> {
             }
         }
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        use arboard::Clipboard;
+        let mut cb = Clipboard::new().map_err(|e| format!("clipboard open failed: {}", e))?;
+        cb.set_text(text.to_string())
+            .map_err(|e| format!("clipboard write failed: {}", e))?;
+        Ok(())
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         let _ = text;
         Err("not implemented on this platform".to_string())

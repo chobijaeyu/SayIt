@@ -173,13 +173,140 @@ pub fn inject_text(text: &str, restore_clipboard: bool) -> InjectResult {
     inject_text_to_hwnd(text, target_hwnd, focus_hwnd, restore_clipboard)
 }
 
-#[cfg(not(windows))]
-pub fn inject_text_to_hwnd(_text: &str, _target: isize, _focus: isize, _restore_clipboard: bool) -> InjectResult {
-    InjectResult { ok: false, strategy: None, reason: Some("not_windows".to_string()), detail: None, uncertain: false }
+#[cfg(target_os = "macos")]
+pub fn inject_text_to_hwnd(text: &str, _target: isize, _focus: isize, restore_clipboard: bool) -> InjectResult {
+    inject_text(text, restore_clipboard)
 }
-#[cfg(not(windows))]
+
+#[cfg(target_os = "macos")]
+pub fn inject_text(text: &str, restore_clipboard: bool) -> InjectResult {
+    macos_inject_text(text, restore_clipboard)
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+pub fn inject_text_to_hwnd(_text: &str, _target: isize, _focus: isize, _restore_clipboard: bool) -> InjectResult {
+    InjectResult { ok: false, strategy: None, reason: Some("unsupported_platform".to_string()), detail: None, uncertain: false }
+}
+#[cfg(not(any(windows, target_os = "macos")))]
 pub fn inject_text(_text: &str, _restore_clipboard: bool) -> InjectResult {
-    InjectResult { ok: false, strategy: None, reason: Some("not_windows".to_string()), detail: None, uncertain: false }
+    InjectResult { ok: false, strategy: None, reason: Some("unsupported_platform".to_string()), detail: None, uncertain: false }
+}
+
+// ─── macOS: clipboard + Cmd+V ───
+
+#[cfg(target_os = "macos")]
+fn macos_inject_text(text: &str, restore_clipboard: bool) -> InjectResult {
+    use arboard::Clipboard;
+    use core_graphics::event::{CGEvent, CGEventFlags, CGEventTapLocation};
+    use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+
+    let previous = if restore_clipboard {
+        Clipboard::new().ok().and_then(|mut c| c.get_text().ok())
+    } else {
+        None
+    };
+
+    let mut clipboard = match Clipboard::new() {
+        Ok(c) => c,
+        Err(e) => {
+            return InjectResult {
+                ok: false,
+                strategy: Some("clipboard".into()),
+                reason: Some("clipboard_open_failed".into()),
+                detail: Some(e.to_string()),
+                uncertain: false,
+            };
+        }
+    };
+
+    if let Err(e) = clipboard.set_text(text.to_string()) {
+        return InjectResult {
+            ok: false,
+            strategy: Some("clipboard".into()),
+            reason: Some("clipboard_write_failed".into()),
+            detail: Some(e.to_string()),
+            uncertain: false,
+        };
+    }
+
+    // 给目标应用一点时间感知剪贴板变化
+    std::thread::sleep(std::time::Duration::from_millis(30));
+
+    // Carbon virtual key for 'v'
+    const KEY_V: u16 = 0x09;
+    let source = match CGEventSource::new(CGEventSourceStateID::HIDSystemState) {
+        Ok(s) => s,
+        Err(_) => {
+            return InjectResult {
+                ok: false,
+                strategy: Some("cmd_v".into()),
+                reason: Some("event_source_failed".into()),
+                detail: Some("CGEventSource create failed".into()),
+                uncertain: false,
+            };
+        }
+    };
+
+    let post_key = |keycode: u16, key_down: bool, flags: CGEventFlags| -> bool {
+        match CGEvent::new_keyboard_event(source.clone(), keycode, key_down) {
+            Ok(ev) => {
+                ev.set_flags(flags);
+                ev.post(CGEventTapLocation::HID);
+                true
+            }
+            Err(_) => false,
+        }
+    };
+
+    let flags = CGEventFlags::CGEventFlagCommand;
+    let ok = post_key(KEY_V, true, flags) && post_key(KEY_V, false, flags);
+    if !ok {
+        return InjectResult {
+            ok: false,
+            strategy: Some("cmd_v".into()),
+            reason: Some("send_cmd_v_failed".into()),
+            detail: None,
+            uncertain: false,
+        };
+    }
+
+    crate::commands::system::write_log_line(&format!(
+        "[RUST] [inject-macos] cmd+v ok utf8Len={} restore={}",
+        text.len(),
+        restore_clipboard
+    ));
+
+    if restore_clipboard {
+        let prev = previous;
+        let injected = text.to_string();
+        std::thread::spawn(move || {
+            // 等目标应用读完剪贴板再还原
+            std::thread::sleep(std::time::Duration::from_millis(350));
+            if let Ok(mut cb) = Clipboard::new() {
+                let current = cb.get_text().ok();
+                // 仅当剪贴板仍是我们注入的内容时才还原，避免覆盖用户新复制
+                if current.as_deref() == Some(injected.as_str()) {
+                    match prev {
+                        Some(t) => {
+                            let _ = cb.set_text(t);
+                        }
+                        None => {
+                            let _ = cb.clear();
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    InjectResult {
+        ok: true,
+        strategy: Some("clipboard_cmd_v".into()),
+        reason: None,
+        detail: None,
+        // 无法可靠确认目标是否可编辑
+        uncertain: true,
+    }
 }
 
 fn is_likely_editable(ctx: &context::AppContext) -> bool {

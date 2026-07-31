@@ -8,7 +8,7 @@ edition = "2021"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["tray-icon", "image-png", "image-ico"] }
+tauri = { version = "2", features = ["tray-icon", "image-png", "image-ico", "macos-private-api"] }
 tauri-plugin-shell = "2"
 tauri-plugin-clipboard-manager = "2"
 tauri-plugin-dialog = "2"
@@ -59,3 +59,10 @@ windows = { version = "0.58", features = [
 ] }
 # 与 tauri/wry 内部同版本，用于挂 WebView2 的 PermissionRequested 处理器（把麦克风置为持久授权）
 webview2-com = "0.38"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+arboard = "3"
+core-foundation = "0.10"
+core-graphics = "0.24"
+cocoa = "0.26"
+objc = "0.2"

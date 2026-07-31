@@ -53,9 +53,11 @@ pub fn models_dir() -> PathBuf {
     default_models_dir()
 }
 
-/// 获取指定模型的目录
+/// 获取指定模型的目录（model_id 必须为安全 id，防止路径穿越）
 pub fn model_dir(model_id: &str) -> PathBuf {
-    models_dir().join(model_id)
+    let safe = crate::path_guard::sanitize_file_id(model_id)
+        .unwrap_or_else(|_| "invalid-model".to_string());
+    models_dir().join(safe)
 }
 
 /// 构建带 User-Agent 的 HTTP 客户端（魔搭等平台要求）

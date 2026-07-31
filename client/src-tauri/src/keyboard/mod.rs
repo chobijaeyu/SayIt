@@ -113,11 +113,57 @@ fn vk_codes_for_setting(setting: &str) -> Vec<u32> {
     if setting.is_empty() {
         return vec![];
     }
-    SINGLE_KEY_TABLE
-        .iter()
-        .find(|(s, _)| *s == setting)
-        .map(|(_, vk)| vec![*vk])
-        .unwrap_or_else(|| vec![0xA5]) // default: AltRight
+    #[cfg(target_os = "macos")]
+    {
+        return macos_keycodes_for_setting(setting);
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        SINGLE_KEY_TABLE
+            .iter()
+            .find(|(s, _)| *s == setting)
+            .map(|(_, vk)| vec![*vk])
+            .unwrap_or_else(|| vec![0xA5]) // default: AltRight
+    }
+}
+
+/// macOS Carbon virtual key codes（与 Windows VK 不同，仅在 macOS hook 内比较）。
+#[cfg(target_os = "macos")]
+fn macos_keycodes_for_setting(setting: &str) -> Vec<u32> {
+    // 来源：HIToolbox/Events.h
+    let code: Option<u32> = match setting {
+        "AltLeft" => Some(0x3A),       // Option
+        "AltRight" => Some(0x3D),      // Right Option
+        "ControlLeft" => Some(0x3B),
+        "ControlRight" => Some(0x3E),
+        "ShiftLeft" => Some(0x38),
+        "ShiftRight" => Some(0x3C),
+        "CapsLock" => Some(0x39),
+        "Space" => Some(0x31),
+        "F1" => Some(0x7A),
+        "F2" => Some(0x78),
+        "F3" => Some(0x63),
+        "F4" => Some(0x76),
+        "F5" => Some(0x60),
+        "F6" => Some(0x61),
+        "F7" => Some(0x62),
+        "F8" => Some(0x64),
+        "F9" => Some(0x65),
+        "F10" => Some(0x6D),
+        "F11" => Some(0x67),
+        "F12" => Some(0x6F),
+        // 鼠标侧键 / 浏览器键：macOS 事件抽头首版不覆盖
+        "XButton1" | "XButton2" | "MButton" | "BrowserBack" | "BrowserForward" | "ContextMenu"
+        | "Pause" | "ScrollLock" | "Insert" => None,
+        _ => None,
+    };
+    match code {
+        Some(c) => vec![c],
+        None => {
+            // 默认右 Option，与 Windows 默认右 Alt 对应
+            vec![0x3D]
+        }
+    }
 }
 
 /// Check if a shortcut setting is a single key (handled by hook) vs combo (handled by global_shortcut)
@@ -126,6 +172,7 @@ pub fn is_single_key_setting(setting: &str) -> bool {
 }
 
 /// 该设置是否为鼠标侧键（由低级鼠标钩子处理，而非键盘钩子）。
+#[cfg_attr(not(windows), allow(dead_code))]
 fn is_mouse_button_setting(setting: &str) -> bool {
     matches!(setting, "XButton1" | "XButton2" | "MButton")
 }
@@ -176,7 +223,7 @@ struct HookSharedState {
 }
 
 /// Message sent from the hook callback (non-blocking) to the dispatcher thread.
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 #[allow(dead_code)]
 enum HookAction {
     PttDown { vk: u32, gen: u64 },
@@ -273,11 +320,16 @@ pub fn spawn_health_watchdog() {
 }
 
 // Thread-local storage for the hook callback
+#[cfg(any(windows, target_os = "macos"))]
 thread_local! {
-    static HOOK_STATE: std::cell::RefCell<Option<Arc<HookSharedState>>> = std::cell::RefCell::new(None);
+    static HOOK_STATE: std::cell::RefCell<Option<Arc<HookSharedState>>> = const { std::cell::RefCell::new(None) };
     /// Non-blocking channel sender for offloading work from the hook callback.
-    static HOOK_ACTION_TX: std::cell::RefCell<Option<std::sync::mpsc::SyncSender<HookAction>>> = std::cell::RefCell::new(None);
+    static HOOK_ACTION_TX: std::cell::RefCell<Option<std::sync::mpsc::SyncSender<HookAction>>> = const { std::cell::RefCell::new(None) };
 }
+
+/// macOS：保存 CFRunLoop，便于 stop() 打断。
+#[cfg(target_os = "macos")]
+static MACOS_RUNLOOP: Mutex<Option<core_foundation::runloop::CFRunLoop>> = Mutex::new(None);
 
 pub struct KeyboardHookManager {
     hook_thread_id: Mutex<Option<u32>>,
@@ -388,6 +440,13 @@ impl KeyboardHookManager {
             #[cfg(windows)]
             unsafe {
                 let _ = PostThreadMessageW(thread_id, WM_QUIT, WPARAM(0), LPARAM(0));
+            }
+            #[cfg(target_os = "macos")]
+            {
+                let _ = thread_id;
+                if let Some(rl) = MACOS_RUNLOOP.lock().unwrap().take() {
+                    rl.stop();
+                }
             }
         }
 
@@ -637,11 +696,336 @@ impl KeyboardHookManager {
         });
     }
 
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    fn hook_thread(state: Arc<HookSharedState>, tx: std::sync::mpsc::Sender<u32>) {
+        macos_hook_thread(state, tx);
+    }
+
+    #[cfg(not(any(windows, target_os = "macos")))]
     fn hook_thread(_state: Arc<HookSharedState>, tx: std::sync::mpsc::Sender<u32>) {
         let _ = tx.send(0);
-        // No-op on non-Windows
+        // No-op on unsupported platforms
     }
+}
+
+// ─── macOS CGEventTap PTT ───
+
+#[cfg(target_os = "macos")]
+fn macos_hook_thread(state: Arc<HookSharedState>, tx: std::sync::mpsc::Sender<u32>) {
+    use core_foundation::runloop::{kCFRunLoopCommonModes, CFRunLoop};
+    use core_graphics::event::{
+        CGEventTap, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement, CGEventType,
+    };
+
+    log::info!(
+        "macos keyboard tap starting, ptt_setting={} keycodes={:?}",
+        state.ptt_setting,
+        state.ptt_vk_codes
+    );
+
+    // 无辅助功能权限时 EventTap 创建会失败
+    if !macos_accessibility_trusted(true) {
+        log::error!("macOS Accessibility permission not granted; global PTT will not work");
+        crate::commands::system::write_log_line(
+            "[ptt-lifecycle] macOS Accessibility not trusted — open System Settings → Privacy & Security → Accessibility",
+        );
+        let _ = tx.send(0);
+        return;
+    }
+
+    let (action_tx, action_rx) = std::sync::mpsc::sync_channel::<HookAction>(64);
+    let dispatch_state = state.clone();
+    thread::Builder::new()
+        .name("ptt-dispatcher".to_string())
+        .spawn(move || {
+            let _alive_guard = DispatcherAliveGuard::new();
+            crate::commands::system::write_log_line("[ptt-dispatcher] thread started (macos)");
+            while let Ok(action) = action_rx.recv() {
+                match action {
+                    HookAction::PttDown { vk, gen } => {
+                        let setting = &dispatch_state.ptt_setting;
+                        crate::commands::system::write_log_line(&format!(
+                            "[RUST] [ptt] keydown vk={} setting={} gen={}",
+                            vk, setting, gen
+                        ));
+                        let event = PTTEvent {
+                            source: "rust_hook".into(),
+                            reason: "keydown".into(),
+                            vk,
+                            ptt_setting: setting.clone(),
+                            timestamp: chrono::Utc::now().timestamp_millis(),
+                            alt_key: setting == "AltLeft" || setting == "AltRight",
+                            ctrl_key: setting == "ControlLeft" || setting == "ControlRight",
+                            shift_key: setting == "ShiftLeft" || setting == "ShiftRight",
+                        };
+                        let _ = dispatch_state.app_handle.emit("ptt-down", &event);
+
+                        let state_clone = dispatch_state.clone();
+                        thread::spawn(move || {
+                            thread::sleep(std::time::Duration::from_secs(240));
+                            if state_clone.ptt_generation.load(Ordering::SeqCst) == gen
+                                && state_clone.ptt_key_down.load(Ordering::SeqCst)
+                            {
+                                let warn_event = PTTEvent {
+                                    source: "rust_hook".into(),
+                                    reason: "timeout_warning".into(),
+                                    vk,
+                                    ptt_setting: state_clone.ptt_setting.clone(),
+                                    timestamp: chrono::Utc::now().timestamp_millis(),
+                                    alt_key: false,
+                                    ctrl_key: false,
+                                    shift_key: false,
+                                };
+                                let _ = state_clone.app_handle.emit("ptt-timeout-warning", &warn_event);
+                            }
+                            thread::sleep(std::time::Duration::from_secs(60));
+                            if state_clone.ptt_generation.load(Ordering::SeqCst) == gen
+                                && state_clone.ptt_key_down.load(Ordering::SeqCst)
+                            {
+                                state_clone.ptt_key_down.store(false, Ordering::SeqCst);
+                                let timeout_event = PTTEvent {
+                                    source: "rust_hook".into(),
+                                    reason: "hard_timeout_release".into(),
+                                    vk,
+                                    ptt_setting: state_clone.ptt_setting.clone(),
+                                    timestamp: chrono::Utc::now().timestamp_millis(),
+                                    alt_key: false,
+                                    ctrl_key: false,
+                                    shift_key: false,
+                                };
+                                let _ = state_clone.app_handle.emit("ptt-up", &timeout_event);
+                            }
+                        });
+                    }
+                    HookAction::PttUp { vk } => {
+                        let setting = &dispatch_state.ptt_setting;
+                        crate::commands::system::write_log_line(&format!(
+                            "[RUST] [ptt] keyup vk={} setting={}",
+                            vk, setting
+                        ));
+                        let event = PTTEvent {
+                            source: "rust_hook".into(),
+                            reason: "keyup".into(),
+                            vk,
+                            ptt_setting: setting.clone(),
+                            timestamp: chrono::Utc::now().timestamp_millis(),
+                            alt_key: setting == "AltLeft" || setting == "AltRight",
+                            ctrl_key: setting == "ControlLeft" || setting == "ControlRight",
+                            shift_key: setting == "ShiftLeft" || setting == "ShiftRight",
+                        };
+                        let _ = dispatch_state.app_handle.emit("ptt-up", &event);
+                    }
+                    HookAction::HfToggle { vk } => {
+                        crate::commands::system::write_log_line(&format!(
+                            "[RUST] [hf] toggle vk={} setting={}",
+                            vk, dispatch_state.hf_setting
+                        ));
+                        let _ = dispatch_state.app_handle.emit(
+                            "toggle-hands-free",
+                            serde_json::json!({ "source": "rust_hook", "vk": vk }),
+                        );
+                    }
+                    HookAction::Diag { .. } | HookAction::MouseCaptured { .. } => {}
+                }
+            }
+            crate::commands::system::write_log_line("[ptt-dispatcher] thread exited (macos)");
+        })
+        .expect("failed to spawn ptt-dispatcher");
+
+    HOOK_STATE.with(|s| {
+        *s.borrow_mut() = Some(state.clone());
+    });
+    HOOK_ACTION_TX.with(|s| {
+        *s.borrow_mut() = Some(action_tx);
+    });
+
+    let events = vec![
+        CGEventType::KeyDown,
+        CGEventType::KeyUp,
+        CGEventType::FlagsChanged,
+    ];
+
+    let tap = match CGEventTap::new(
+        CGEventTapLocation::HID,
+        CGEventTapPlacement::HeadInsertEventTap,
+        CGEventTapOptions::Default,
+        events,
+        |_proxy, etype, event| macos_handle_event(etype, event),
+    ) {
+        Ok(t) => t,
+        Err(()) => {
+            log::error!("CGEventTapCreate failed (need Accessibility permission?)");
+            crate::commands::system::write_log_line("[ptt-lifecycle] CGEventTapCreate failed");
+            let _ = tx.send(0);
+            return;
+        }
+    };
+
+    let loop_source = tap
+        .mach_port
+        .create_runloop_source(0)
+        .expect("runloop source");
+    let runloop = CFRunLoop::get_current();
+    runloop.add_source(&loop_source, unsafe { kCFRunLoopCommonModes });
+    tap.enable();
+
+    *MACOS_RUNLOOP.lock().unwrap() = Some(runloop.clone());
+    // 没有真正的 thread id；用 1 表示成功，便于 start() 记 running
+    let _ = tx.send(1);
+    crate::commands::system::write_log_line(
+        "[ptt-lifecycle] macOS CGEventTap installed, runloop starting",
+    );
+
+    // keep `tap` alive for the duration of the runloop
+    let _tap_keep = tap;
+    CFRunLoop::run_current();
+
+    // teardown
+    *MACOS_RUNLOOP.lock().unwrap() = None;
+    HOOK_STATE.with(|s| {
+        *s.borrow_mut() = None;
+    });
+    HOOK_ACTION_TX.with(|s| {
+        *s.borrow_mut() = None;
+    });
+    crate::commands::system::write_log_line("[ptt-lifecycle] macOS CGEventTap runloop exited");
+}
+
+#[cfg(target_os = "macos")]
+fn macos_accessibility_trusted(prompt: bool) -> bool {
+    use core_foundation::base::TCFType;
+    use core_foundation::boolean::CFBoolean;
+    use core_foundation::dictionary::CFDictionary;
+    use core_foundation::string::CFString;
+    use std::ffi::c_void;
+
+    #[link(name = "ApplicationServices", kind = "framework")]
+    extern "C" {
+        fn AXIsProcessTrustedWithOptions(options: *const c_void) -> bool;
+    }
+
+    if !prompt {
+        return unsafe { AXIsProcessTrustedWithOptions(std::ptr::null()) };
+    }
+
+    let key = CFString::new("AXTrustedCheckOptionPrompt");
+    let value = CFBoolean::true_value();
+    let dict = CFDictionary::from_CFType_pairs(&[(key.as_CFType(), value.as_CFType())]);
+    unsafe { AXIsProcessTrustedWithOptions(dict.as_concrete_TypeRef() as *const c_void) }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_handle_event(
+    etype: core_graphics::event::CGEventType,
+    event: &core_graphics::event::CGEvent,
+) -> Option<core_graphics::event::CGEvent> {
+    use core_graphics::event::{CGEventFlags, CGEventType, EventField};
+
+    LAST_CALLBACK_MS.store(now_ms(), Ordering::SeqCst);
+
+    let is_flags = matches!(etype, CGEventType::FlagsChanged);
+    let is_down = matches!(etype, CGEventType::KeyDown);
+    let is_up = matches!(etype, CGEventType::KeyUp);
+    if !is_flags && !is_down && !is_up {
+        return Some(event.clone());
+    }
+
+    let keycode = event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE) as u32;
+
+    // FlagsChanged：根据修饰键当前 flags 判断 down/up
+    let (keydown, keyup) = if is_flags {
+        let flags = event.get_flags();
+        let active = match keycode {
+            0x3A | 0x3D => flags.contains(CGEventFlags::CGEventFlagAlternate), // Option
+            0x3B | 0x3E => flags.contains(CGEventFlags::CGEventFlagControl),
+            0x38 | 0x3C => flags.contains(CGEventFlags::CGEventFlagShift),
+            0x39 => flags.contains(CGEventFlags::CGEventFlagAlphaShift), // CapsLock
+            _ => false,
+        };
+        if keycode == 0x39 {
+            (false, false)
+        } else if active {
+            (true, false)
+        } else {
+            (false, true)
+        }
+    } else {
+        (is_down, is_up)
+    };
+
+    let mut consume = false;
+
+    HOOK_STATE.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(state) = borrow.as_ref() else {
+            return;
+        };
+
+        let (eff_down, eff_up) = if keycode == 0x39 && is_flags {
+            if state.ptt_vk_codes.contains(&keycode) {
+                if state.ptt_key_down.load(Ordering::SeqCst) {
+                    (false, true)
+                } else {
+                    (true, false)
+                }
+            } else {
+                (false, false)
+            }
+        } else {
+            (keydown, keyup)
+        };
+
+        // ── PTT ──
+        if state.ptt_vk_codes.contains(&keycode) {
+            if state.hands_free_active.load(Ordering::SeqCst) {
+                // 免提录音中忽略 PTT
+            } else if eff_down {
+                if !state.ptt_key_down.swap(true, Ordering::SeqCst) {
+                    let gen = state.ptt_generation.fetch_add(1, Ordering::SeqCst) + 1;
+                    try_send_action(HookAction::PttDown { vk: keycode, gen });
+                }
+                consume = true;
+            } else if eff_up {
+                if state.ptt_key_down.swap(false, Ordering::SeqCst) {
+                    try_send_action(HookAction::PttUp { vk: keycode });
+                }
+                consume = true;
+            }
+        }
+
+        // ── Hands-free toggle ──
+        if state.hf_vk_codes.contains(&keycode) {
+            if keycode == 0x39 && is_flags {
+                try_send_action(HookAction::HfToggle { vk: keycode });
+                consume = true;
+            } else if eff_down {
+                state.hf_key_down.store(true, Ordering::SeqCst);
+                consume = true;
+            } else if eff_up {
+                if state.hf_key_down.swap(false, Ordering::SeqCst) {
+                    try_send_action(HookAction::HfToggle { vk: keycode });
+                }
+                consume = true;
+            }
+        }
+    });
+
+    if consume {
+        None // 吞掉，避免修饰键落入前台 App
+    } else {
+        Some(event.clone())
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn try_send_action(action: HookAction) {
+    HOOK_ACTION_TX.with(|cell| {
+        if let Some(tx) = cell.borrow().as_ref() {
+            if tx.try_send(action).is_err() {
+                TRY_SEND_FAIL_COUNT.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    });
 }
 
 /// 低级鼠标钩子回调：只处理鼠标侧键（XButton1/2）的按下/抬起，复用与键盘钩子

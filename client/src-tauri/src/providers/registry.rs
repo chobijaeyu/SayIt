@@ -1,7 +1,10 @@
 // 供应商注册表 — Tauri commands 入口
 
 use super::types::*;
-use super::{ai_openai_compat, ai_ollama, asr_doubao, asr_doubao_stream, asr_qwen, asr_qwen_omni, asr_mimo};
+use super::{
+    ai_openai_compat, ai_ollama, asr_doubao, asr_doubao_stream, asr_mimo, asr_openai_compat,
+    asr_qwen, asr_qwen_omni,
+};
 
 /// 云端 AI 校对（Tauri command）
 #[tauri::command]
@@ -92,6 +95,15 @@ pub async fn cloud_transcribe(request: CloudTranscribeRequest) -> Result<AsrResu
             )
             .await
         }
+        "openai_compat" => {
+            asr_openai_compat::transcribe(
+                &request.audio_b64,
+                request.sample_rate,
+                config,
+                &request.hotwords,
+            )
+            .await
+        }
         // TODO: "aliyun" => 阿里云 Paraformer（需要文件 URL + 异步轮询，暂未实现）
         other => Err(format!("ASR 供应商 \"{}\" 尚未实现", other)),
     }
@@ -106,6 +118,7 @@ pub async fn test_asr_connection(config: AsrProviderConfig) -> Result<TestResult
         "qwen" | "aliyun" | "qwen_realtime" => Ok(asr_qwen::test_connection(&config).await),
         "qwen_omni" => Ok(asr_qwen_omni::test_connection(&config).await),
         "mimo" => Ok(asr_mimo::test_connection(&config).await),
+        "openai_compat" => Ok(asr_openai_compat::test_connection(&config).await),
         other => Err(format!("ASR 供应商 \"{}\" 尚未实现", other)),
     }
 }

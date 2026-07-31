@@ -9,6 +9,7 @@ mod context;
 mod inject;
 mod providers;
 mod models;
+mod path_guard;
 
 use storage::Storage;
 use window::WindowState;
