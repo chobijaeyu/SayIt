@@ -18,7 +18,14 @@ let firstPCMFrameLogged = false
 let firstRmsLogged = false
 let usingFallback = false
 
+/** 预热中的麦克风流：后台 PTT 时 getUserMedia 会卡死在 WKWebView，必须事先开好。 */
+let warmStream: MediaStream | null = null
+let warmDeviceId: string | undefined
+let warmInFlight: Promise<void> | null = null
+
 const TARGET_SAMPLE_RATE = 16000
+/** getUserMedia 超时（后台时常见无限挂起） */
+const GET_USER_MEDIA_TIMEOUT_MS = 4000
 
 // HMR cleanup: tear down audio capture when module is hot-replaced
 if ((import.meta as unknown as Record<string, unknown>).hot) {
@@ -42,6 +49,10 @@ if ((import.meta as unknown as Record<string, unknown>).hot) {
     if (mediaStream) {
       mediaStream.getTracks().forEach((track) => track.stop())
       mediaStream = null
+    }
+    if (warmStream) {
+      warmStream.getTracks().forEach((track) => track.stop())
+      warmStream = null
     }
     if (audioCtx && audioCtx.state !== 'closed') {
       audioCtx.close().catch(() => { })
@@ -171,7 +182,92 @@ function createAudioContext() {
   return new AudioContextCtor()
 }
 
-async function teardownCapture() {
+function isStreamLive(stream: MediaStream | null): boolean {
+  if (!stream) return false
+  const tracks = stream.getAudioTracks()
+  return tracks.length > 0 && tracks.every((t) => t.readyState === 'live')
+}
+
+function buildAudioConstraints(deviceId?: string): MediaStreamConstraints {
+  return {
+    audio: {
+      channelCount: 1,
+      echoCancellation: false,
+      noiseSuppression: true,
+      autoGainControl: false,
+      ...(deviceId ? { deviceId: { exact: deviceId } } : {}),
+    },
+  }
+}
+
+async function getUserMediaWithTimeout(
+  constraints: MediaStreamConstraints,
+  timeoutMs = GET_USER_MEDIA_TIMEOUT_MS,
+): Promise<MediaStream> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      navigator.mediaDevices.getUserMedia(constraints),
+      new Promise<MediaStream>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`麦克风打开超时（${timeoutMs}ms）。请把 SayIt 切到前台一次以预热麦克风。`)),
+          timeoutMs,
+        )
+      }),
+    ])
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
+}
+
+/** 预热麦克风：在应用前台时打开设备并常驻，供后台 PTT 瞬间复用。 */
+export async function prewarmMicrophone(deviceId?: string): Promise<boolean> {
+  const wanted = deviceId || undefined
+  if (isStreamLive(warmStream) && warmDeviceId === wanted) {
+    return true
+  }
+  if (warmInFlight) {
+    await warmInFlight
+    return isStreamLive(warmStream)
+  }
+
+  warmInFlight = (async () => {
+    if (warmStream && (!isStreamLive(warmStream) || warmDeviceId !== wanted)) {
+      warmStream.getTracks().forEach((t) => t.stop())
+      warmStream = null
+    }
+    if (isStreamLive(warmStream) && warmDeviceId === wanted) return
+
+    const t0 = performance.now()
+    addRuntimeEvent('info', 'audio', '麦克风预热开始', { deviceId: wanted || 'default' })
+    try {
+      const stream = await getUserMediaWithTimeout(buildAudioConstraints(wanted), 8000)
+      warmStream = stream
+      warmDeviceId = wanted
+      addRuntimeEvent('info', 'audio', '麦克风预热成功', {
+        deviceId: wanted || 'default',
+        elapsedMs: Math.round(performance.now() - t0),
+        trackLabel: stream.getAudioTracks()[0]?.label || '',
+      })
+    } catch (error) {
+      addRuntimeEvent('warn', 'audio', '麦克风预热失败', {
+        deviceId: wanted || 'default',
+        error: String(error),
+        elapsedMs: Math.round(performance.now() - t0),
+      })
+    }
+  })()
+
+  try {
+    await warmInFlight
+  } finally {
+    warmInFlight = null
+  }
+  return isStreamLive(warmStream)
+}
+
+/** 仅拆掉处理图；默认保留 warm 流供下次复用（避免后台再次 getUserMedia 卡死）。 */
+async function teardownCapture(options?: { releaseWarmStream?: boolean }) {
   if (workletNode) {
     try { workletNode.port.onmessage = null } catch { /* ignore */ }
     try { workletNode.disconnect() } catch { /* ignore */ }
@@ -190,7 +286,12 @@ async function teardownCapture() {
   }
 
   if (mediaStream) {
-    mediaStream.getTracks().forEach((track) => track.stop())
+    if (!options?.releaseWarmStream && isStreamLive(mediaStream)) {
+      warmStream = mediaStream
+    } else {
+      mediaStream.getTracks().forEach((track) => track.stop())
+      if (warmStream === mediaStream) warmStream = null
+    }
     mediaStream = null
   }
 
@@ -199,6 +300,16 @@ async function teardownCapture() {
   }
   audioCtx = null
   actualSampleRate = TARGET_SAMPLE_RATE
+}
+
+/** 彻底释放预热流（退出应用 / 切换设备时） */
+export async function releaseWarmMicrophone() {
+  await teardownCapture({ releaseWarmStream: true })
+  if (warmStream) {
+    warmStream.getTracks().forEach((t) => t.stop())
+    warmStream = null
+  }
+  warmDeviceId = undefined
 }
 
 // ── Resampler state for ScriptProcessorNode fallback ──
@@ -505,26 +616,46 @@ export async function startCapture(
   actualSampleRate = TARGET_SAMPLE_RATE
   usingFallback = false
 
-  const constraints: MediaStreamConstraints = {
-    audio: {
-      channelCount: 1,
-      echoCancellation: false,
-      // 默认开启降噪：部分机器麦克风底噪大（低频电流声），关闭降噪会原样录入。
-      // 回声消除/自动增益保持关闭，避免影响 ASR 音频。
-      noiseSuppression: true,
-      autoGainControl: false,
-      ...(deviceId ? { deviceId: { exact: deviceId } } : {}),
-    },
-  }
+  const wanted = deviceId || undefined
+  const constraints = buildAudioConstraints(wanted)
 
   try {
-    console.log('[audio-diag] getUserMedia starting...', { deviceId: deviceId || 'default' })
-    mediaStream = await navigator.mediaDevices.getUserMedia(constraints)
-    const track = mediaStream.getAudioTracks()[0] || null
+    const t0 = performance.now()
+    // 优先复用预热流：后台 WKWebView 里重新 getUserMedia 会挂起数秒到永远
+    if (isStreamLive(warmStream) && warmDeviceId === wanted) {
+      mediaStream = warmStream
+      warmStream = null // 会话占用中
+      addRuntimeEvent('info', 'audio', '复用预热麦克风流', {
+        requestedDeviceId: wanted || 'default',
+        elapsedMs: Math.round(performance.now() - t0),
+      })
+      console.log('[audio-diag] reusing warm MediaStream', { deviceId: wanted || 'default' })
+    } else {
+      console.log('[audio-diag] getUserMedia starting...', { deviceId: wanted || 'default' })
+      addRuntimeEvent('info', 'audio', 'getUserMedia 开始', { deviceId: wanted || 'default' })
+      mediaStream = await getUserMediaWithTimeout(constraints)
+      warmDeviceId = wanted
+      addRuntimeEvent('info', 'audio', 'getUserMedia 成功', {
+        deviceId: wanted || 'default',
+        elapsedMs: Math.round(performance.now() - t0),
+      })
+    }
+
+    const stream = mediaStream
+    if (!stream) {
+      throw new Error('麦克风流为空')
+    }
+
+    // 确保 track 开启
+    stream.getAudioTracks().forEach((t) => {
+      if (!t.enabled) t.enabled = true
+    })
+
+    const track = stream.getAudioTracks()[0] || null
     const settings = track?.getSettings?.()
 
     console.log('[audio-diag] getUserMedia success', {
-      trackCount: mediaStream.getAudioTracks().length,
+      trackCount: stream.getAudioTracks().length,
       trackLabel: track?.label,
       trackEnabled: track?.enabled,
       trackMuted: track?.muted,
@@ -533,9 +664,10 @@ export async function startCapture(
     })
 
     addRuntimeEvent('info', 'audio', '麦克风采集已启动', {
-      requestedDeviceId: deviceId || 'default',
+      requestedDeviceId: wanted || 'default',
       trackLabel: track?.label || '',
       trackSettings: settings || null,
+      elapsedMs: Math.round(performance.now() - t0),
     })
 
     audioCtx = createAudioContext()
@@ -545,7 +677,7 @@ export async function startCapture(
       sampleRate: audioCtx.sampleRate,
     })
 
-    sourceNode = audioCtx.createMediaStreamSource(mediaStream)
+    sourceNode = audioCtx.createMediaStreamSource(stream)
 
     // Try AudioWorklet, with ScriptProcessor fallback
     const fallbackCtx = audioCtx

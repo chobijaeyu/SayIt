@@ -1,5 +1,5 @@
 import * as bridge from '../bridge'
-import { startCapture, stopCapture } from '../audio'
+import { prewarmMicrophone, startCapture, stopCapture } from '../audio'
 import { getProvider, type TranscriptionProvider, type TranscriptionCallbacks, type FinalResult } from '../transcription'
 import { isStreamingDisplayReady } from '@/lib/asrModels'
 import {
@@ -278,6 +278,18 @@ export class RecorderOrchestrator {
     void this.ensureClientRuntimeInfo()
     this.ensureConnection()
 
+    // 前台预热麦克风：后台 PTT 时 WKWebView 再调 getUserMedia 会卡在三个点
+    void this.prewarmMic('init')
+    // 回到前台 / 窗口可见时再预热（防止系统回收了预热流）
+    window.addEventListener('focus', () => { void this.prewarmMic('window-focus') })
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') {
+        void this.prewarmMic('visibility')
+      }
+    })
+    // 每 3 分钟续命一次预热流
+    window.setInterval(() => { void this.prewarmMic('interval') }, 3 * 60 * 1000)
+
     // 快捷键切换润色模式（由 Rust global_shortcut 触发）
     void bridge.listen('switch-preset', (event: unknown) => {
       const payload = (event as { payload?: { presetId?: string } })?.payload
@@ -412,7 +424,14 @@ export class RecorderOrchestrator {
     }
   }
 
+  private prewarmMic(reason: string) {
+    const deviceId = this.cachedMicId || undefined
+    addRuntimeEvent('info', 'audio', '请求麦克风预热', { reason, deviceId: deviceId || 'default' })
+    return prewarmMicrophone(deviceId)
+  }
+
   async refreshRuntimeSettings() {
+    const prevMic = this.cachedMicId
     const [
       micId,
       muteSystemAudio,
@@ -448,6 +467,11 @@ export class RecorderOrchestrator {
     this.cachedUserStats = userStats
     this.cachedStreamingDisplay = Boolean(streamingDisplay)
     await this.overlayService.refreshSettings()
+
+    // 麦克风设备变更时重新预热
+    if (this.initialized && this.cachedMicId !== prevMic) {
+      void this.prewarmMic('mic-changed')
+    }
 
     // 热词 / 服务器语言彼此独立，并行加载而非依次 await，减少本函数的总耗时
     // （每次切换 AI 整理开关等都会触发这里）。

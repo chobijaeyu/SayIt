@@ -10,12 +10,76 @@
 
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](./LICENSE)
 [![Windows](https://img.shields.io/badge/Platform-Windows-0078D6?logo=windows)](https://github.com/crosswk/SayIt/releases)
+[![macOS](https://img.shields.io/badge/Platform-macOS-000000?logo=apple)](https://github.com/chobijaeyu/SayIt)
 
-**[下载客户端](https://github.com/crosswk/SayIt/releases/latest)** · **[网页版体验](https://sayitapp.site)** · **[配置文档](docs/)**
+**上游 / 原项目：[crosswk/SayIt](https://github.com/crosswk/SayIt)** · **[网页版体验](https://sayitapp.site)** · **[配置文档](docs/)**
 
-**视频介绍：[我做了一个开源 AI 语音输入法——SayIt](https://www.bilibili.com/video/BV1JLTs6REPU/)**（B 站）
+**视频介绍（原作者）：[我做了一个开源 AI 语音输入法——SayIt](https://www.bilibili.com/video/BV1JLTs6REPU/)**（B 站）
 
 </div>
+
+---
+
+## 致谢原作者
+
+本仓库是 [**crosswk/SayIt**](https://github.com/crosswk/SayIt) 的 fork。
+
+SayIt 的产品设计、Windows 客户端、服务端、云 API 模式、AI 润色与整套用户体验，均来自原作者 **[crosswk](https://github.com/crosswk)** 的工作。没有原项目，就不会有这里的 macOS 适配与后续改动。
+
+- 原仓库：https://github.com/crosswk/SayIt  
+- 许可证：AGPL-3.0（本 fork 继承相同许可证）  
+- 若你主要在 Windows 上使用、或需要官方发布包，请优先关注上游 Releases  
+
+向原作者致谢，并建议给上游点一个 ⭐。
+
+---
+
+## 本 fork 做了什么
+
+在原版能力之上，本 fork 侧重 **macOS 可用**、**海外 / OpenRouter 友好**，以及一批稳定性与安全修补：
+
+### 平台
+
+- **macOS 客户端**：全局热键（CGEventTap）、剪贴板 + `Cmd+V` 注入、前台应用上下文  
+- **打包与安装**：`dmg` / `.app`、麦克风用途说明（Info.plist）、`install-macos-app.sh`  
+- **稳定 adhoc 签名标识**（`com.sayit.app`），减轻每次重装后辅助功能权限错乱  
+- **辅助功能**：未授权时明确失败；引导授权；粘贴失败时降级为仅复制到剪贴板  
+
+### 云 API / 模型
+
+- **OpenAI 兼容 ASR**（`openai_compat`）：OpenAI / OpenRouter 等共用 `/v1/audio/transcriptions`  
+- **ASR 与 AI 独立配置**：可混搭不同供应商（例如 ASR 走 OpenRouter，润色走另一模型）  
+- **OpenRouter URL 修正**：避免把 `openrouter.ai/api` 误拼成 `/api/v3` 导致 404  
+- **校对场景关闭 reasoning**：DeepSeek / OpenRouter 上减少思考 token，降低延迟尖刺  
+- 推荐模型后缀：`deepseek/deepseek-v4-flash:nitro`（速度优先路由，非固定某一 provider）  
+
+### 热键与录音体验（macOS）
+
+- EventTap **ListenOnly** + 被系统禁用后自动 re-enable  
+- **HID 键状态轮询兜底**（修饰键如 Right Shift 后台更稳）  
+- 禁止「已授权时周期性 reconfigure 钩子」导致的全系统卡键  
+- **麦克风预热与复用**：解决「后台只出三个点、切前台才嘀一声才能录」——根因是 WKWebView 后台 `getUserMedia` 挂起  
+
+### 安全
+
+- **`path_guard`**：收紧音频 / 诊断 / 更新等文件相关 IPC，防止路径穿越  
+- 安全审查：无静默遥测上传（以当前 fork 代码为准）  
+
+### 开发与安装（macOS）
+
+```bash
+cd client
+npm install
+# 开发
+npm run tauri dev
+# 构建并安装到 /Applications（稳定 codesign id）
+./install-macos-app.sh
+```
+
+首次 / 重装后请到 **系统设置 → 隐私与安全性 → 辅助功能** 勾选 `SayIt`（`/Applications/SayIt.app`）。  
+adhoc 签名每次重新编译 CDHash 可能变化，系统有时会要求重新授权。
+
+> 说明：本 fork 仍在迭代；未改动的行为与文档默认仍以上游为准。贡献请尽量同时考虑是否适合回馈上游。
 
 ---
 
@@ -41,7 +105,7 @@
 
 ---
 
-## 为什么做 SayIt
+## 为什么做 SayIt（原作者）
 
 在 AI 时代，模型的输出 Token 速度越来越快，人却受限于打字速度。特别是和 AI 对话时，说话是非常自然和高效的方式。
 
@@ -65,9 +129,10 @@ SayIt 后端部署使用的是 Qwen3-ASR，效果仅次于豆包，开源模型�
 
 **大部分用户直接下载客户端即可，无需任何配置。**
 
-[下载 Windows 安装包](https://github.com/crosswk/SayIt/releases/latest)
+- **Windows**：请使用上游官方包 — [crosswk/SayIt Releases](https://github.com/crosswk/SayIt/releases/latest)  
+- **macOS（本 fork）**：目前以自行构建 / `./install-macos-app.sh` 安装为主（见上文「本 fork 做了什么」）
 
-安装后默认连接我提供的公共服务器，开箱即用。服务器端的 AI 使用的是 Groq 提供的 OpenAI 120B 模型，会有免费的请求限制。
+上游安装包默认连接原作者提供的公共服务器，开箱即用。服务器端 AI 使用 Groq 上的 OpenAI 120B 模型，有免费请求限制。
 
 也可以先通过 [网页版 Demo](https://sayitapp.site) 快速体验 ASR 的识别速度和效果，无需安装任何东西。
 
@@ -87,8 +152,12 @@ SayIt 后端部署使用的是 Qwen3-ASR，效果仅次于豆包，开源模型�
 
 不需要服务器，客户端直接调用云端服务。对于个人用户来说：
 
-- **语音识别**：申请一个豆包 ASR API 就能获得最好的中文识别效果
-- **AI 润色**：推荐 DeepSeek deepseek-v4-flash，速度快价格便宜
+- **语音识别**  
+  - 中文效果优先：豆包 ASR（上游主推）  
+  - 本 fork 另支持 **OpenAI 兼容 ASR**（OpenAI / OpenRouter 等，如 `gpt-4o-mini-transcribe`）  
+- **AI 润色**  
+  - 推荐 DeepSeek `deepseek-v4-flash`（便宜）  
+  - 走 OpenRouter 时可用 `deepseek/deepseek-v4-flash:nitro`，并确保校对请求关闭 reasoning  
 
 每月成本约几元钱。详见配置文档：
 - [语音识别配置](docs/SayIt%20语音识别配置.md)
@@ -131,7 +200,7 @@ cd backend && uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 - **全局语音输入** — 在任何应用中按下快捷键即可口述，文字自动插入光标位置
 - **AI 智能润色** — 口语自动转书面语，去口癖、纠错、分段，Prompt 完全可自定义
-- **多种语音识别** — 豆包 ASR、千问 ASR，以及本地离线识别（SenseVoice、Qwen3-ASR，基于 sherpa-onnx）
+- **多种语音识别** — 豆包 ASR、千问 ASR、OpenAI 兼容（OpenAI/OpenRouter），以及本地离线识别（SenseVoice、Qwen3-ASR，基于 sherpa-onnx）
 - **热词增强** — 自定义专业术语词表；豆包、千问、服务器模式和本地 Qwen3-ASR 会参与 ASR 识别偏置，本地 SenseVoice 则通过 AI 整理/文本处理做后处理纠错
 - **悬浮窗反馈** — 录音状态、波形动画、处理进度实时可见
 - **历史记录** — 所有转录结果本地保存，支持搜索和收藏
@@ -167,10 +236,10 @@ SayIt/
 | 层　　　　　　 | 技术　　　　　　　　　　　　　　　　　　　　　　　　 |
 | ----------------| ------------------------------------------------------|
 | 桌面客户端　　 | Tauri v2、React、TypeScript、Tailwind CSS　　　　　　|
-| 客户端系统集成 | Rust（全局键盘钩子、剪贴板、SQLite）　　　　　　　　 |
+| 客户端系统集成 | Rust（Win 低级钩子 / macOS CGEventTap、剪贴板、SQLite） |
 | 后端服务　　　 | Python、FastAPI、WebSocket　　　　　　　　　　　　　 |
-| 语音识别　　　 | Qwen3-ASR + vLLM / 豆包 ASR / 千问 ASR / sherpa-onnx |
-| AI 润色　　　　| DeepSeek / 通义千问 / Azure OpenAI / Ollama　　　　　|
+| 语音识别　　　 | Qwen3-ASR + vLLM / 豆包 / 千问 / OpenAI 兼容 / sherpa-onnx |
+| AI 润色　　　　| DeepSeek / 通义 / OpenRouter / Azure OpenAI / Ollama　|
 | 部署　　　　　 | Docker Compose、NVIDIA Container Toolkit　　　　　　 |
 | 开发　　　　　 | 整个项目使用 Claude Opus 开发　　　　　　　　　　　　|
 
@@ -219,8 +288,8 @@ cd backend && uvicorn app.main:app --port 8000
 ## Contributors
 
 <!-- ALL-CONTRIBUTORS-LIST:START -->
-| [<img src="https://github.com/crosswk.png" width="60"><br><sub>crosswk</sub>](https://github.com/crosswk) | [<img src="https://avatars.githubusercontent.com/u/76263028" width="60"><br><sub>Claude (Anthropic)</sub>](https://claude.ai) |
-|:---:|:---:|
+| [<img src="https://github.com/crosswk.png" width="60"><br><sub>crosswk</sub>](https://github.com/crosswk)<br>原作者 | [<img src="https://avatars.githubusercontent.com/u/76263028" width="60"><br><sub>Claude (Anthropic)</sub>](https://claude.ai) | [<img src="https://github.com/chobijaeyu.png" width="60"><br><sub>chobijaeyu</sub>](https://github.com/chobijaeyu)<br>本 fork |
+|:---:|:---:|:---:|
 <!-- ALL-CONTRIBUTORS-LIST:END -->
 
 ## 许可证

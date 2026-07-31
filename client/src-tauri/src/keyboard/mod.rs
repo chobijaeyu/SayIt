@@ -308,6 +308,21 @@ pub fn spawn_health_watchdog() {
                 let last_log = WD_LAST_LOG_MS.load(Ordering::SeqCst);
                 let heartbeat_due = last_log == 0 || (now_ms() - last_log) >= WD_HEARTBEAT_MS;
 
+                // macOS：若钩子声称在跑但长时间收不到任何键盘回调，主动 re-enable tap。
+                // 正常打字时 LAST_CALLBACK 会持续刷新；长时间空白多半是系统静默禁用了 tap。
+                #[cfg(target_os = "macos")]
+                {
+                    let last_cb = LAST_CALLBACK_MS.load(Ordering::SeqCst);
+                    let age = if last_cb == 0 { -1 } else { now_ms() - last_cb };
+                    if hook_running && age > 120_000 {
+                        crate::commands::system::write_log_line(&format!(
+                            "[ptt-watchdog] last_callback_age_ms={} — proactive CGEventTap re-enable",
+                            age
+                        ));
+                        macos_reenable_event_tap();
+                    }
+                }
+
                 if state_changed || heartbeat_due {
                     write_health_snapshot(if state_changed { "change" } else { "heartbeat" });
                     WD_LAST_HOOK_RUNNING.store(hook_running, Ordering::SeqCst);
@@ -330,6 +345,11 @@ thread_local! {
 /// macOS：保存 CFRunLoop，便于 stop() 打断。
 #[cfg(target_os = "macos")]
 static MACOS_RUNLOOP: Mutex<Option<core_foundation::runloop::CFRunLoop>> = Mutex::new(None);
+
+/// macOS：当前 CGEventTap 的 CFMachPort 原始指针，用于被系统禁用后重新 enable。
+/// 指针仅在 hook 线程 runloop 存活期间有效（由 `_tap_keep` 持有）。
+#[cfg(target_os = "macos")]
+static MACOS_TAP_PORT: Mutex<Option<usize>> = Mutex::new(None);
 
 pub struct KeyboardHookManager {
     hook_thread_id: Mutex<Option<u32>>,
@@ -762,6 +782,8 @@ fn macos_hook_thread(state: Arc<HookSharedState>, tx: std::sync::mpsc::Sender<u3
     }
 
     let (action_tx, action_rx) = std::sync::mpsc::sync_channel::<HookAction>(64);
+    // 全局备份：keystate 轮询线程不在 hook TLS 里，需走这条路径
+    *POLL_ACTION_TX.lock().unwrap() = Some(action_tx.clone());
     let dispatch_state = state.clone();
     thread::Builder::new()
         .name("ptt-dispatcher".to_string())
@@ -867,18 +889,43 @@ fn macos_hook_thread(state: Arc<HookSharedState>, tx: std::sync::mpsc::Sender<u3
         *s.borrow_mut() = Some(action_tx);
     });
 
+    // ListenOnly：被动监听，不会因回调超时被系统静默禁用。
+    // Active(Default) 的「吞键」在 core-graphics 0.24 里本身就吞不掉，还更容易被 timeout 掐死，
+    // 表现就是：前台（webview 回退）还能用，后台全局钩子突然没了。
+    // TapDisabled* 仍监听 + re-enable 作双保险。
     let events = vec![
         CGEventType::KeyDown,
         CGEventType::KeyUp,
         CGEventType::FlagsChanged,
+        CGEventType::TapDisabledByTimeout,
+        CGEventType::TapDisabledByUserInput,
     ];
 
     let tap = match CGEventTap::new(
         CGEventTapLocation::HID,
         CGEventTapPlacement::HeadInsertEventTap,
-        CGEventTapOptions::Default,
+        CGEventTapOptions::ListenOnly,
         events,
-        |_proxy, etype, event| macos_handle_event(etype, event),
+        |_proxy, etype, event| {
+            if matches!(
+                etype,
+                CGEventType::TapDisabledByTimeout | CGEventType::TapDisabledByUserInput
+            ) {
+                let reason = match etype {
+                    CGEventType::TapDisabledByTimeout => "timeout",
+                    CGEventType::TapDisabledByUserInput => "user_input",
+                    _ => "unknown",
+                };
+                log::warn!("CGEventTap disabled by {} — re-enabling", reason);
+                crate::commands::system::write_log_line(&format!(
+                    "[ptt-lifecycle] CGEventTap disabled by {} — re-enabling",
+                    reason
+                ));
+                macos_reenable_event_tap();
+                return Some(event.clone());
+            }
+            macos_handle_event(etype, event)
+        },
     ) {
         Ok(t) => t,
         Err(()) => {
@@ -889,6 +936,13 @@ fn macos_hook_thread(state: Arc<HookSharedState>, tx: std::sync::mpsc::Sender<u3
         }
     };
 
+    // 保存 port 供禁用后 re-enable（tap 本体由 _tap_keep 保活）
+    {
+        use core_foundation::base::TCFType;
+        let port_ptr = tap.mach_port.as_concrete_TypeRef() as usize;
+        *MACOS_TAP_PORT.lock().unwrap() = Some(port_ptr);
+    }
+
     let loop_source = tap
         .mach_port
         .create_runloop_source(0)
@@ -897,19 +951,90 @@ fn macos_hook_thread(state: Arc<HookSharedState>, tx: std::sync::mpsc::Sender<u3
     runloop.add_source(&loop_source, unsafe { kCFRunLoopCommonModes });
     tap.enable();
 
+    // 轮询存活标志：HOOK_RUNNING 要等 start() 收到 thread_id 才置位，太晚。
+    // 用独立 Atomic 与 runloop 同寿。
+    let poll_alive = Arc::new(AtomicBool::new(true));
+    let poll_alive_flag = poll_alive.clone();
+
+    // 修饰键（Right Shift 等）用 HID 状态轮询兜底：EventTap 被掐/漏事件时仍能后台触发。
+    // 20ms 一轮，开销可忽略；与 EventTap 共享 ptt_key_down，不会双发。
+    let poll_state = state.clone();
+    thread::Builder::new()
+        .name("ptt-keystate-poll".to_string())
+        .spawn(move || {
+            crate::commands::system::write_log_line(
+                "[ptt-lifecycle] keystate poller started (20ms, HID fallback)",
+            );
+            let mut last_ptt_down = false;
+            let mut last_hf_down = false;
+            let mut reenable_ticks: u32 = 0;
+            while poll_alive_flag.load(Ordering::SeqCst) {
+                thread::sleep(std::time::Duration::from_millis(20));
+                reenable_ticks = reenable_ticks.wrapping_add(1);
+                // 每 ~2s 确认 tap 仍 enable（ListenOnly 一般不会挂，双保险）
+                if reenable_ticks % 100 == 0 {
+                    macos_reenable_event_tap();
+                }
+
+                let ptt_phys = poll_state
+                    .ptt_vk_codes
+                    .iter()
+                    .any(|&code| macos_hid_key_down(code));
+                let hf_phys = poll_state
+                    .hf_vk_codes
+                    .iter()
+                    .any(|&code| macos_hid_key_down(code));
+
+                if poll_state.hands_free_active.load(Ordering::SeqCst) {
+                    last_ptt_down = ptt_phys;
+                    last_hf_down = hf_phys;
+                    continue;
+                }
+
+                // PTT 边沿
+                if ptt_phys && !last_ptt_down {
+                    if !poll_state.ptt_key_down.swap(true, Ordering::SeqCst) {
+                        let gen = poll_state.ptt_generation.fetch_add(1, Ordering::SeqCst) + 1;
+                        let vk = poll_state.ptt_vk_codes.first().copied().unwrap_or(0);
+                        LAST_CALLBACK_MS.store(now_ms(), Ordering::SeqCst);
+                        try_send_action_from_poll(HookAction::PttDown { vk, gen });
+                    }
+                } else if !ptt_phys && last_ptt_down {
+                    if poll_state.ptt_key_down.swap(false, Ordering::SeqCst) {
+                        let vk = poll_state.ptt_vk_codes.first().copied().unwrap_or(0);
+                        LAST_CALLBACK_MS.store(now_ms(), Ordering::SeqCst);
+                        try_send_action_from_poll(HookAction::PttUp { vk });
+                    }
+                }
+                last_ptt_down = ptt_phys;
+
+                // 免提：抬起时 toggle（与 FlagsChanged 路径一致）
+                if !hf_phys && last_hf_down {
+                    let vk = poll_state.hf_vk_codes.first().copied().unwrap_or(0);
+                    try_send_action_from_poll(HookAction::HfToggle { vk });
+                }
+                last_hf_down = hf_phys;
+            }
+            crate::commands::system::write_log_line("[ptt-lifecycle] keystate poller exited");
+        })
+        .ok();
+
     *MACOS_RUNLOOP.lock().unwrap() = Some(runloop.clone());
     // 没有真正的 thread id；用 1 表示成功，便于 start() 记 running
     let _ = tx.send(1);
     crate::commands::system::write_log_line(
-        "[ptt-lifecycle] macOS CGEventTap installed, runloop starting",
+        "[ptt-lifecycle] macOS CGEventTap installed (ListenOnly + keystate poll), runloop starting",
     );
 
     // keep `tap` alive for the duration of the runloop
     let _tap_keep = tap;
     CFRunLoop::run_current();
 
-    // teardown
+    // teardown：先停轮询再清 channel
+    poll_alive.store(false, Ordering::SeqCst);
     *MACOS_RUNLOOP.lock().unwrap() = None;
+    *MACOS_TAP_PORT.lock().unwrap() = None;
+    *POLL_ACTION_TX.lock().unwrap() = None;
     HOOK_STATE.with(|s| {
         *s.borrow_mut() = None;
     });
@@ -917,6 +1042,48 @@ fn macos_hook_thread(state: Arc<HookSharedState>, tx: std::sync::mpsc::Sender<u3
         *s.borrow_mut() = None;
     });
     crate::commands::system::write_log_line("[ptt-lifecycle] macOS CGEventTap runloop exited");
+}
+
+/// HID 级键位是否按下（不依赖 EventTap，后台也可用）。
+#[cfg(target_os = "macos")]
+fn macos_hid_key_down(keycode: u32) -> bool {
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" {
+        fn CGEventSourceKeyState(state_id: u32, key: u16) -> bool;
+    }
+    // kCGEventSourceStateHIDSystemState = 1
+    unsafe { CGEventSourceKeyState(1, keycode as u16) }
+}
+
+/// 轮询线程投递动作：与 hook 回调共用 HOOK_ACTION_TX（在 hook 线程 TLS 里）。
+/// 轮询在另一线程，直接走全局 sender 备份。
+#[cfg(target_os = "macos")]
+static POLL_ACTION_TX: Mutex<Option<std::sync::mpsc::SyncSender<HookAction>>> = Mutex::new(None);
+
+#[cfg(target_os = "macos")]
+fn try_send_action_from_poll(action: HookAction) {
+    if let Some(tx) = POLL_ACTION_TX.lock().unwrap().as_ref() {
+        if tx.try_send(action).is_err() {
+            TRY_SEND_FAIL_COUNT.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+}
+
+/// 重新启用被系统禁用的 CGEventTap（timeout / secure input 等）。
+#[cfg(target_os = "macos")]
+fn macos_reenable_event_tap() {
+    use core_foundation::mach_port::CFMachPortRef;
+
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" {
+        fn CGEventTapEnable(tap: CFMachPortRef, enable: bool);
+    }
+
+    if let Some(port) = *MACOS_TAP_PORT.lock().unwrap() {
+        unsafe {
+            CGEventTapEnable(port as CFMachPortRef, true);
+        }
+    }
 }
 
 /// 查询（并可弹出系统提示）当前进程是否已获辅助功能权限。

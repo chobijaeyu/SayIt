@@ -34,22 +34,7 @@ pub async fn polish(
         ]
     });
 
-    // 通义千问 Qwen3 默认开启思考模式，校对场景不需要
-    if config.provider == "qwen" {
-        body.as_object_mut().unwrap().insert(
-            "enable_thinking".to_string(),
-            serde_json::Value::Bool(false),
-        );
-    }
-
-    // DeepSeek / 小米 MiMo 默认开启思考，校对场景关闭以大幅降低延迟。
-    // 注意：小米原生端点用 thinking.type=disabled（官方文档），对 enable_thinking 无效。
-    if config.provider == "deepseek" || config.provider == "mimo" {
-        body.as_object_mut().unwrap().insert(
-            "thinking".to_string(),
-            serde_json::json!({"type": "disabled"}),
-        );
-    }
+    inject_disable_thinking(&mut body, config);
 
     let client = reqwest::Client::new();
     let start = Instant::now();
@@ -97,6 +82,23 @@ pub async fn polish(
         .await
         .map_err(|e| format!("解析响应失败: {}", e))?;
 
+    // 便于对照 OpenRouter Activity：看实际落到哪个 host、是否仍在 reasoning
+    if let Some(provider) = data.get("provider").and_then(|v| v.as_str()) {
+        let reason_tok = data
+            .get("usage")
+            .and_then(|u| u.get("completion_tokens_details"))
+            .and_then(|d| d.get("reasoning_tokens"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        log::info!(
+            "ai polish provider={} model={} elapsed_ms={} reasoning_tokens={}",
+            provider,
+            config.model,
+            elapsed_ms,
+            reason_tok
+        );
+    }
+
     let result_text = extract_chat_completion_text(&data)
         .unwrap_or_else(|| text.to_string());
 
@@ -127,19 +129,7 @@ pub async fn test_connection(config: &AiProviderConfig) -> TestResult {
         ]
     });
 
-    if config.provider == "qwen" {
-        body.as_object_mut().unwrap().insert(
-            "enable_thinking".to_string(),
-            serde_json::Value::Bool(false),
-        );
-    }
-
-    if config.provider == "deepseek" || config.provider == "mimo" {
-        body.as_object_mut().unwrap().insert(
-            "thinking".to_string(),
-            serde_json::json!({"type": "disabled"}),
-        );
-    }
+    inject_disable_thinking(&mut body, config);
 
     let client = reqwest::Client::new();
     let start = Instant::now();
@@ -243,6 +233,46 @@ fn describe_reqwest_error(e: &reqwest::Error) -> String {
         return format!("无法连接到服务器: {}", raw);
     }
     raw
+}
+
+/// 校对场景一律关闭思考/推理。覆盖：
+/// - provider 字段为 qwen / deepseek / mimo
+/// - openai_compat + OpenRouter 上 model slug 含 deepseek/qwen（此前只看 provider，漏关）
+/// OpenRouter 实测 `reasoning.effort=none` 比单独 `thinking.disabled` 更稳。
+fn inject_disable_thinking(body: &mut serde_json::Value, config: &AiProviderConfig) {
+    let Some(obj) = body.as_object_mut() else {
+        return;
+    };
+    let provider = config.provider.to_ascii_lowercase();
+    let model = config.model.to_ascii_lowercase();
+    let url = config.api_url.to_ascii_lowercase();
+    let is_openrouter = url.contains("openrouter");
+    let is_openai_compat = provider == "openai_compat" || is_openrouter;
+
+    let is_qwen = provider == "qwen" || model.contains("qwen");
+    let is_deepseek_family = provider == "deepseek"
+        || provider == "mimo"
+        || model.contains("deepseek")
+        || model.contains("mimo");
+
+    if is_qwen {
+        obj.insert("enable_thinking".to_string(), serde_json::Value::Bool(false));
+    }
+
+    if is_deepseek_family {
+        // 原生 DeepSeek / MiMo：thinking.type=disabled
+        obj.insert(
+            "thinking".to_string(),
+            serde_json::json!({"type": "disabled"}),
+        );
+        // OpenRouter 等多 provider 网关：额外带 reasoning.effort=none（实测更可靠）
+        if is_openai_compat {
+            obj.insert(
+                "reasoning".to_string(),
+                serde_json::json!({"effort": "none"}),
+            );
+        }
+    }
 }
 
 /// 规范化 base URL，得到可拼 `/chat/completions` 的前缀。
