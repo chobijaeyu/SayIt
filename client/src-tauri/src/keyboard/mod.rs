@@ -384,21 +384,49 @@ impl KeyboardHookManager {
             Self::hook_thread(state_for_thread, tx);
         });
 
-        // Wait for the thread to report its ID
-        if let Ok(thread_id) = rx.recv_timeout(std::time::Duration::from_secs(5)) {
-            *self.hook_thread_id.lock().unwrap() = Some(thread_id);
-            HOOK_RUNNING.store(true, Ordering::SeqCst);
-            log::info!("Keyboard hook started, thread_id={}", thread_id);
-            crate::commands::system::write_log_line(&format!(
-                "[ptt-lifecycle] hook started OK thread_id={}", thread_id,
-            ));
-        } else {
-            log::error!("Keyboard hook thread failed to start");
-            crate::commands::system::write_log_line(
-                "[ptt-lifecycle] hook FAILED to start (rx.recv_timeout expired after 5s)"
-            );
-            self.running.store(false, Ordering::SeqCst);
-            HOOK_RUNNING.store(false, Ordering::SeqCst);
+        // Wait for the thread to report its ID.
+        // macOS: thread_id==0 表示辅助功能未授权 / EventTap 创建失败，不能当成功。
+        match rx.recv_timeout(std::time::Duration::from_secs(5)) {
+            Ok(0) => {
+                log::error!("Keyboard hook failed (thread_id=0 — typically missing Accessibility on macOS)");
+                crate::commands::system::write_log_line(
+                    "[ptt-lifecycle] hook FAILED thread_id=0 (macOS: need Accessibility permission for background hotkeys)",
+                );
+                self.running.store(false, Ordering::SeqCst);
+                HOOK_RUNNING.store(false, Ordering::SeqCst);
+                *self.hook_thread_id.lock().unwrap() = None;
+                #[cfg(target_os = "macos")]
+                {
+                    let _ = app.emit(
+                        "macos-accessibility-status",
+                        serde_json::json!({ "trusted": false }),
+                    );
+                }
+            }
+            Ok(thread_id) => {
+                *self.hook_thread_id.lock().unwrap() = Some(thread_id);
+                HOOK_RUNNING.store(true, Ordering::SeqCst);
+                log::info!("Keyboard hook started, thread_id={}", thread_id);
+                crate::commands::system::write_log_line(&format!(
+                    "[ptt-lifecycle] hook started OK thread_id={}",
+                    thread_id,
+                ));
+                #[cfg(target_os = "macos")]
+                {
+                    let _ = app.emit(
+                        "macos-accessibility-status",
+                        serde_json::json!({ "trusted": true }),
+                    );
+                }
+            }
+            Err(_) => {
+                log::error!("Keyboard hook thread failed to start");
+                crate::commands::system::write_log_line(
+                    "[ptt-lifecycle] hook FAILED to start (rx.recv_timeout expired after 5s)",
+                );
+                self.running.store(false, Ordering::SeqCst);
+                HOOK_RUNNING.store(false, Ordering::SeqCst);
+            }
         }
     }
 
@@ -891,8 +919,9 @@ fn macos_hook_thread(state: Arc<HookSharedState>, tx: std::sync::mpsc::Sender<u3
     crate::commands::system::write_log_line("[ptt-lifecycle] macOS CGEventTap runloop exited");
 }
 
+/// 查询（并可弹出系统提示）当前进程是否已获辅助功能权限。
 #[cfg(target_os = "macos")]
-fn macos_accessibility_trusted(prompt: bool) -> bool {
+pub fn macos_accessibility_trusted(prompt: bool) -> bool {
     use core_foundation::base::TCFType;
     use core_foundation::boolean::CFBoolean;
     use core_foundation::dictionary::CFDictionary;
@@ -912,6 +941,26 @@ fn macos_accessibility_trusted(prompt: bool) -> bool {
     let value = CFBoolean::true_value();
     let dict = CFDictionary::from_CFType_pairs(&[(key.as_CFType(), value.as_CFType())]);
     unsafe { AXIsProcessTrustedWithOptions(dict.as_concrete_TypeRef() as *const c_void) }
+}
+
+/// 打开系统设置 → 隐私与安全性 → 辅助功能
+#[cfg(target_os = "macos")]
+pub fn open_macos_accessibility_settings() -> Result<(), String> {
+    // macOS 13+ / 较旧路径各试一次
+    let urls = [
+        "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
+        "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_Accessibility",
+    ];
+    for url in urls {
+        if std::process::Command::new("open")
+            .arg(url)
+            .spawn()
+            .is_ok()
+        {
+            return Ok(());
+        }
+    }
+    Err("无法打开系统设置".into())
 }
 
 #[cfg(target_os = "macos")]

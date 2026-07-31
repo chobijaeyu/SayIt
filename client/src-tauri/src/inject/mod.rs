@@ -200,6 +200,24 @@ fn macos_inject_text(text: &str, restore_clipboard: bool) -> InjectResult {
     use core_graphics::event::{CGEvent, CGEventFlags, CGEventTapLocation};
     use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 
+    // 无辅助功能时系统会忽略跨应用合成按键；只写剪贴板并返回失败，走前端兜底卡片
+    let ax_ok = crate::keyboard::macos_accessibility_trusted(false);
+    if !ax_ok {
+        if let Ok(mut cb) = Clipboard::new() {
+            let _ = cb.set_text(text.to_string());
+        }
+        crate::commands::system::write_log_line(
+            "[RUST] [inject-macos] skipped cmd+v: Accessibility not trusted; text copied to clipboard only",
+        );
+        return InjectResult {
+            ok: false,
+            strategy: Some("clipboard_only".into()),
+            reason: Some("accessibility_required".into()),
+            detail: Some("需要「辅助功能」权限才能自动粘贴到其它 App；文字已复制到剪贴板，可手动 Cmd+V".into()),
+            uncertain: false,
+        };
+    }
+
     let previous = if restore_clipboard {
         Clipboard::new().ok().and_then(|mut c| c.get_text().ok())
     } else {
@@ -230,7 +248,7 @@ fn macos_inject_text(text: &str, restore_clipboard: bool) -> InjectResult {
     }
 
     // 给目标应用一点时间感知剪贴板变化
-    std::thread::sleep(std::time::Duration::from_millis(30));
+    std::thread::sleep(std::time::Duration::from_millis(40));
 
     // Carbon virtual key for 'v'
     const KEY_V: u16 = 0x09;
@@ -239,9 +257,9 @@ fn macos_inject_text(text: &str, restore_clipboard: bool) -> InjectResult {
         Err(_) => {
             return InjectResult {
                 ok: false,
-                strategy: Some("cmd_v".into()),
+                strategy: Some("clipboard_only".into()),
                 reason: Some("event_source_failed".into()),
-                detail: Some("CGEventSource create failed".into()),
+                detail: Some("CGEventSource create failed; text on clipboard".into()),
                 uncertain: false,
             };
         }
@@ -258,20 +276,25 @@ fn macos_inject_text(text: &str, restore_clipboard: bool) -> InjectResult {
         }
     };
 
+    // 先按 Cmd 再按 V，抬起顺序相反，提高目标 App 识别率
+    const KEY_CMD: u16 = 0x37;
     let flags = CGEventFlags::CGEventFlagCommand;
-    let ok = post_key(KEY_V, true, flags) && post_key(KEY_V, false, flags);
+    let ok = post_key(KEY_CMD, true, flags)
+        && post_key(KEY_V, true, flags)
+        && post_key(KEY_V, false, flags)
+        && post_key(KEY_CMD, false, CGEventFlags::CGEventFlagNull);
     if !ok {
         return InjectResult {
             ok: false,
-            strategy: Some("cmd_v".into()),
+            strategy: Some("clipboard_only".into()),
             reason: Some("send_cmd_v_failed".into()),
-            detail: None,
+            detail: Some("Cmd+V 发送失败；文字已在剪贴板".into()),
             uncertain: false,
         };
     }
 
     crate::commands::system::write_log_line(&format!(
-        "[RUST] [inject-macos] cmd+v ok utf8Len={} restore={}",
+        "[RUST] [inject-macos] cmd+v posted utf8Len={} restore={} ax=true",
         text.len(),
         restore_clipboard
     ));
@@ -280,11 +303,10 @@ fn macos_inject_text(text: &str, restore_clipboard: bool) -> InjectResult {
         let prev = previous;
         let injected = text.to_string();
         std::thread::spawn(move || {
-            // 等目标应用读完剪贴板再还原
-            std::thread::sleep(std::time::Duration::from_millis(350));
+            // macOS 目标 App 读剪贴板偏慢，给更长窗口再还原
+            std::thread::sleep(std::time::Duration::from_millis(600));
             if let Ok(mut cb) = Clipboard::new() {
                 let current = cb.get_text().ok();
-                // 仅当剪贴板仍是我们注入的内容时才还原，避免覆盖用户新复制
                 if current.as_deref() == Some(injected.as_str()) {
                     match prev {
                         Some(t) => {
@@ -304,7 +326,7 @@ fn macos_inject_text(text: &str, restore_clipboard: bool) -> InjectResult {
         strategy: Some("clipboard_cmd_v".into()),
         reason: None,
         detail: None,
-        // 无法可靠确认目标是否可编辑
+        // 合成按键无法 100% 确认是否落地
         uncertain: true,
     }
 }

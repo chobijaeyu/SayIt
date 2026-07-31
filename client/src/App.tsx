@@ -4,6 +4,7 @@ import { listen } from '@tauri-apps/api/event'
 import Sidebar from './components/Sidebar'
 import TitleBar from './components/TitleBar'
 import WelcomeGuide from './components/WelcomeGuide'
+import AccessibilityBanner from './components/AccessibilityBanner'
 import Home from './pages/Home'
 import History from './pages/History'
 import Favorites from './pages/Favorites'
@@ -80,6 +81,7 @@ export default function App() {
   return (
     <div className="flex h-screen flex-col">
       <TitleBar />
+      <AccessibilityBanner />
       <div className="flex flex-1 overflow-hidden">
         <Sidebar />
         <main className="custom-scrollbar flex-1 overflow-y-auto bg-background p-8">

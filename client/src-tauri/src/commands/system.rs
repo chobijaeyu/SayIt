@@ -424,6 +424,48 @@ pub fn install_downloaded_update(file_path: String, app: AppHandle) -> Result<()
     }
 }
 
+/// macOS：是否已授权「辅助功能」（后台全局热键 + 自动粘贴必需）。
+/// 其它平台恒为 true。
+#[tauri::command]
+pub fn check_accessibility_permission() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        crate::keyboard::macos_accessibility_trusted(false)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        true
+    }
+}
+
+/// macOS：弹出系统辅助功能授权对话框（若尚未授权），并打开设置页。
+#[tauri::command]
+pub fn request_accessibility_permission() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        let trusted = crate::keyboard::macos_accessibility_trusted(true);
+        let _ = crate::keyboard::open_macos_accessibility_settings();
+        trusted
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        true
+    }
+}
+
+/// 打开系统「辅助功能」设置页（仅 macOS 有实际动作）。
+#[tauri::command]
+pub fn open_accessibility_settings() -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        crate::keyboard::open_macos_accessibility_settings()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Ok(())
+    }
+}
+
 #[tauri::command]
 pub fn append_debug_log(payload: Value) -> Result<(), String> {
     // Format a compact single-line representation for the log file
