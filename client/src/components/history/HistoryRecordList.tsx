@@ -1,5 +1,5 @@
 ﻿import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Trash2, ChevronDown, ChevronUp, VolumeX, Star, Play, Pause, RotateCcw, Loader2, Download, Check, Copy, X, FolderOpen, Pencil } from 'lucide-react'
+import { Trash2, ChevronDown, ChevronUp, VolumeX, Star, Play, Pause, RotateCcw, Loader2, Download, Check, Copy, X, FolderOpen, Pencil, GraduationCap } from 'lucide-react'
 import { Tooltip } from '@/components/ui/tooltip'
 import { Card, CardContent } from '@/components/ui/card'
 import { type HistoryRecord } from '@/services/store'
@@ -7,6 +7,11 @@ import * as bridge from '@/services/bridge'
 import { pickVoiceDurationSec } from '@/services/timeModel'
 import { loadAudioAsDataUrl } from '@/services/audioFileService'
 import { invoke } from '@tauri-apps/api/core'
+import {
+  canLearnFromRecord,
+  explainHistoryRecord,
+  isLikelyTranslationRecord,
+} from '@/services/translationLearning'
 
 /** 云 API 内部 key → 用户友好的模型 ID */
 const ASR_PROVIDER_DISPLAY: Record<string, string> = {
@@ -27,6 +32,8 @@ interface HistoryRecordListProps {
   onReprocess?: (record: HistoryRecord) => Promise<void> | void
   /** 手工编辑转换结果并保存 */
   onEdit?: (id: string, nextText: string) => Promise<void> | void
+  /** 缓存「学习」讲解到历史记录 */
+  onLearningNotes?: (id: string, notes: string) => Promise<void> | void
   emptyText?: string
   /** 搜索关键词：在正文与 ASR 原文里高亮命中处 */
   highlight?: string
@@ -81,6 +88,7 @@ function HistoryItem({
   onToggleFavorite,
   onReprocess,
   onEdit,
+  onLearningNotes,
   highlight = '',
 }: {
   record: HistoryRecord
@@ -88,6 +96,7 @@ function HistoryItem({
   onToggleFavorite?: (nextFavorite: boolean) => void
   onReprocess?: () => Promise<void> | void
   onEdit?: (nextText: string) => Promise<void> | void
+  onLearningNotes?: (notes: string) => Promise<void> | void
   highlight?: string
 }) {
   const [expanded, setExpanded] = useState(false)
@@ -104,12 +113,55 @@ function HistoryItem({
   const [duration, setDuration] = useState(0)
   const [playbackRate, setPlaybackRate] = useState(1)
   const [audioReady, setAudioReady] = useState(false)
+  const [learningOpen, setLearningOpen] = useState(false)
+  const [learningLoading, setLearningLoading] = useState(false)
+  const [learningError, setLearningError] = useState('')
+  const [learningNotes, setLearningNotes] = useState(record.learningNotes || '')
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const audioUrlRef = useRef<string>('')
   const rafRef = useRef<number>(0)
 
   const text = record.llmText || record.asrText
   const isEmpty = record.isEmpty || (!text && record.charCount === 0)
+  const canLearn = canLearnFromRecord(record)
+  const learnIsTranslation = isLikelyTranslationRecord(record)
+
+  useEffect(() => {
+    setLearningNotes(record.learningNotes || '')
+  }, [record.id, record.learningNotes])
+
+  const handleLearn = useCallback(async () => {
+    if (!canLearn) return
+    setLearningOpen(true)
+    setLearningError('')
+    if (learningNotes.trim()) return
+    setLearningLoading(true)
+    try {
+      const notes = await explainHistoryRecord(record)
+      setLearningNotes(notes)
+      if (onLearningNotes) await onLearningNotes(notes)
+    } catch (err) {
+      setLearningError(String(err))
+    } finally {
+      setLearningLoading(false)
+    }
+  }, [canLearn, learningNotes, onLearningNotes, record])
+
+  const handleRefreshLearn = useCallback(async () => {
+    if (!canLearn) return
+    setLearningOpen(true)
+    setLearningError('')
+    setLearningLoading(true)
+    try {
+      const notes = await explainHistoryRecord(record)
+      setLearningNotes(notes)
+      if (onLearningNotes) await onLearningNotes(notes)
+    } catch (err) {
+      setLearningError(String(err))
+    } finally {
+      setLearningLoading(false)
+    }
+  }, [canLearn, onLearningNotes, record])
   const voiceDurationSec = pickVoiceDurationSec({
     holdSec: record.durationSec,
     audioSec: record.audioDurationSec,
@@ -474,6 +526,57 @@ function HistoryItem({
                       下载失败: {downloadPath}
                     </div>
                   )}
+                  {learningOpen && (
+                    <div className="mt-2 rounded-md border border-sky-500/25 bg-sky-500/5 p-3 text-xs leading-relaxed text-foreground">
+                      <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                        <span className="font-medium text-sky-800 dark:text-sky-200">
+                          {learnIsTranslation ? '翻译学习' : '润色学习'}
+                        </span>
+                        <div className="flex items-center gap-1">
+                          {learningNotes.trim() && !learningLoading && (
+                            <button
+                              type="button"
+                              onClick={() => { void handleRefreshLearn() }}
+                              className="rounded px-1.5 py-0.5 text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground"
+                            >
+                              重新生成
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            onClick={() => setLearningOpen(false)}
+                            className="rounded px-1.5 py-0.5 text-[11px] text-muted-foreground hover:bg-accent hover:text-foreground"
+                          >
+                            收起
+                          </button>
+                        </div>
+                      </div>
+                      <div className="mb-2 space-y-1 text-muted-foreground">
+                        <p>
+                          <span className="font-medium text-foreground/80">原文：</span>
+                          <span className="whitespace-pre-line">{record.asrText}</span>
+                        </p>
+                        <p>
+                          <span className="font-medium text-foreground/80">输出：</span>
+                          <span className="whitespace-pre-line">{record.llmText}</span>
+                        </p>
+                      </div>
+                      {learningLoading && (
+                        <div className="flex items-center gap-2 text-muted-foreground">
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                          正在生成讲解…
+                        </div>
+                      )}
+                      {learningError && (
+                        <p className="text-destructive">{learningError}</p>
+                      )}
+                      {!learningLoading && learningNotes.trim() && (
+                        <div className="whitespace-pre-wrap border-t border-border/60 pt-2 text-[12px] leading-relaxed">
+                          {learningNotes}
+                        </div>
+                      )}
+                    </div>
+                  )}
                   {/* 音频进度条 + 倍速 */}
                   {audioReady && (
                     <div className="mt-2 flex items-center gap-2">
@@ -542,6 +645,27 @@ function HistoryItem({
             </Tooltip>
           )}
 
+          {canLearn && (
+            <Tooltip content={learnIsTranslation ? '学习：为何这样翻译' : '学习：为何这样整理'}>
+              <button
+                type="button"
+                onClick={() => {
+                  setExpanded(true)
+                  void handleLearn()
+                }}
+                disabled={learningLoading}
+                className="inline-flex items-center rounded p-1 transition-colors hover:bg-accent disabled:opacity-50"
+                aria-label="学习"
+              >
+                {learningLoading ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin text-sky-600" />
+                ) : (
+                  <GraduationCap className={`h-3.5 w-3.5 ${learningNotes ? 'text-sky-600' : 'text-muted-foreground'}`} />
+                )}
+              </button>
+            </Tooltip>
+          )}
+
           {!isEmpty && onEdit && !editing && (
             <Tooltip content="编辑文本">
               <button
@@ -597,6 +721,7 @@ function DayGroup({
   onToggleFavorite,
   onReprocess,
   onEdit,
+  onLearningNotes,
   highlight,
 }: {
   label: string
@@ -605,6 +730,7 @@ function DayGroup({
   onToggleFavorite?: (id: string, nextFavorite: boolean) => Promise<void> | void
   onReprocess?: (record: HistoryRecord) => Promise<void> | void
   onEdit?: (id: string, nextText: string) => Promise<void> | void
+  onLearningNotes?: (id: string, notes: string) => Promise<void> | void
   highlight?: string
 }) {
   return (
@@ -620,6 +746,9 @@ function DayGroup({
               onToggleFavorite={onToggleFavorite ? (next) => onToggleFavorite(record.id, next) : undefined}
               onReprocess={onReprocess ? () => onReprocess(record) : undefined}
               onEdit={onEdit ? (nextText) => onEdit(record.id, nextText) : undefined}
+              onLearningNotes={
+                onLearningNotes ? (notes) => onLearningNotes(record.id, notes) : undefined
+              }
               highlight={highlight}
             />
           ))}
@@ -635,6 +764,7 @@ export default function HistoryRecordList({
   onToggleFavorite,
   onReprocess,
   onEdit,
+  onLearningNotes,
   emptyText = '还没有记录，去语音工作台试试吧',
   highlight,
 }: HistoryRecordListProps) {
@@ -676,6 +806,7 @@ export default function HistoryRecordList({
           onToggleFavorite={onToggleFavorite}
           onReprocess={onReprocess}
           onEdit={onEdit}
+          onLearningNotes={onLearningNotes}
           highlight={highlight}
         />
       ))}

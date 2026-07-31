@@ -43,6 +43,9 @@ export interface HistoryRecord {
   asrProvider?: string   // 例如 "server" / "doubao" / "sensevoice-small"
   aiProvider?: string    // 例如 "server" / "openai_compat" / "ollama"
   aiModel?: string       // 例如 "deepseek-chat" / "qwen2.5:7b"
+  /** 历史「学习」按钮生成的翻译/润色讲解（中文），不进入粘贴主路径 */
+  learningNotes?: string
+  learningNotesAt?: number
 }
 
 export interface Stats {

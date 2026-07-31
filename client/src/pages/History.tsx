@@ -351,6 +351,16 @@ export default function History() {
     setRecords((prev) => prev.map((r) => (r.id === id ? { ...r, ...patch } : r)))
   }
 
+  /** 缓存历史「学习」讲解，不触发粘贴、不改变主文本 */
+  const handleLearningNotes = async (id: string, notes: string) => {
+    const patch = {
+      learningNotes: notes,
+      learningNotesAt: Date.now(),
+    }
+    await updateHistoryRecord(id, patch)
+    setRecords((prev) => prev.map((r) => (r.id === id ? { ...r, ...patch } : r)))
+  }
+
   const handleExport = async () => {
     const result = await exportHistory({ keyword: debouncedKeyword })
     setExportResult(result)
@@ -525,6 +535,7 @@ export default function History() {
         onToggleFavorite={handleToggleFavorite}
         onReprocess={handleReprocess}
         onEdit={handleEdit}
+        onLearningNotes={handleLearningNotes}
         highlight={debouncedKeyword}
         emptyText={keyword.trim() ? '没有匹配的历史记录' : favoriteOnly ? '还没有收藏记录，去历史记录里点一下星标吧。' : '还没有记录，去语音工作台试试吧'}
       />
