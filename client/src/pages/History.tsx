@@ -2,6 +2,7 @@ import * as bridge from '@/services/bridge'
 import { cn } from '@/lib/utils'
 import { resolveAsrDisplayModel, isQwenOmniProvider, resolveQwenOmniModel } from '@/lib/asrModels'
 import { uint8ArrayToBase64 } from '@/lib/encoding'
+import { buildCloudAsrConfig } from '@/services/cloudAsrConfig'
 import { getWorkMode } from '@/services/transcription'
 import type { WorkMode } from '@/services/transcription'
 import { useCallback, useEffect, useRef, useState } from 'react'
@@ -165,24 +166,8 @@ async function reprocessViaCloudApi(
   const durationSec = (chunk.byteLength / 2) / 16000
   const audioB64 = uint8ArrayToBase64(new Uint8Array(chunk))
 
-  const asrProvider = await getSetting('cloudAsr.provider', 'doubao') as string
-  const isQwenOmni = isQwenOmniProvider(asrProvider)
-  const asrApiKey = await getSetting('cloudAsr.apiKey', '') as string
-  const asrAppId = await getSetting('cloudAsr.appId', '') as string
-  const qwenOmniModel = resolveQwenOmniModel(asrProvider)
-
-  let omniInstructions: string | undefined
-  if (isQwenOmni) {
-    const savedPrompt = await getSetting('cloudAsr.omniSystemPrompt', '') as string
-    omniInstructions = savedPrompt || undefined
-  }
-
-  const asrConfig: Record<string, unknown> = {
-    provider: isQwenOmni ? 'qwen_omni' : asrProvider,
-    api_key: asrApiKey,
-    app_id: asrAppId,
-    ...(isQwenOmni && { extra: { model: qwenOmniModel, instructions: omniInstructions } }),
-  }
+  const { providerKey: asrProviderKey, config: asrConfig, isQwenOmni } = await buildCloudAsrConfig()
+  const qwenOmniModel = isQwenOmni ? resolveQwenOmniModel(asrProviderKey) : undefined
 
   const asrStart = performance.now()
   const asrResult = await invoke<{ text: string; elapsed_ms: number }>('cloud_transcribe', {

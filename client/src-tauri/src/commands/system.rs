@@ -319,11 +319,13 @@ pub async fn download_update(app: AppHandle, url: String) -> Result<String, Stri
 
     let total = resp.content_length().unwrap_or(0);
 
-    // 从 URL 提取文件名
-    let filename = url.split('/').last().unwrap_or("SayIt-Setup.exe").to_string();
-    let temp_dir = std::env::temp_dir().join("sayit-update");
+    // 从 URL 提取文件名并净化，只写入 sayit-update 临时目录
+    let raw_name = url.split('/').last().unwrap_or("SayIt-Setup.exe");
+    let filename = crate::path_guard::sanitize_basename(raw_name)
+        .unwrap_or_else(|_| "SayIt-Setup.exe".to_string());
+    let temp_dir = crate::path_guard::update_temp_dir();
     std::fs::create_dir_all(&temp_dir).map_err(|e| format!("创建临时目录失败: {}", e))?;
-    let file_path = temp_dir.join(&filename);
+    let file_path = crate::path_guard::resolve_under(&temp_dir, &filename)?;
 
     let mut file = std::fs::File::create(&file_path)
         .map_err(|e| format!("创建文件失败: {}", e))?;
@@ -359,10 +361,13 @@ pub async fn download_update(app: AppHandle, url: String) -> Result<String, Stri
 /// 启动安装程序并退出当前应用
 #[tauri::command]
 pub fn install_downloaded_update(file_path: String, app: AppHandle) -> Result<(), String> {
-    let path = std::path::Path::new(&file_path);
-    if !path.exists() {
-        return Err("安装包文件不存在".to_string());
-    }
+    // 只允许执行本应用下载到 sayit-update 临时目录的安装包，防止前端传入任意路径执行
+    let path = crate::path_guard::require_existing_under(
+        &crate::path_guard::update_temp_dir(),
+        &file_path,
+    )
+    .map_err(|_| "安装包路径非法或不存在".to_string())?;
+    let installer_path = path.to_string_lossy().to_string();
 
     // 启动 NSIS 安装程序（/S 静默安装）。静默模式下 NSIS 不会像交互式安装那样
     // 提供"安装完成后运行"的选项，所以需要自己接管：起一个不依赖当前进程存活的
@@ -394,7 +399,7 @@ pub fn install_downloaded_update(file_path: String, app: AppHandle) -> Result<()
              start /wait \"\" \"{installer}\" /S\r\n\
              start \"\" \"{exe}\" --open-about\r\n\
              del \"%~f0\"\r\n",
-            installer = file_path,
+            installer = installer_path,
             exe = exe_str,
         );
         let script_path = std::env::temp_dir().join("sayit-update-relaunch.bat");
@@ -406,16 +411,17 @@ pub fn install_downloaded_update(file_path: String, app: AppHandle) -> Result<()
             .creation_flags(CREATE_NO_WINDOW)
             .spawn()
             .map_err(|e| format!("启动安装看门人进程失败: {}", e))?;
+
+        // 退出当前应用，让安装程序能够覆盖 exe 文件
+        app.exit(0);
+        Ok(())
     }
 
     #[cfg(not(target_os = "windows"))]
     {
-        return Err("当前平台不支持自动安装".to_string());
+        let _ = (installer_path, app);
+        Err("当前平台不支持自动安装".to_string())
     }
-
-    // 退出当前应用，让安装程序能够覆盖 exe 文件
-    app.exit(0);
-    Ok(())
 }
 
 #[tauri::command]

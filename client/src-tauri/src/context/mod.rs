@@ -410,7 +410,12 @@ fn uia_control_type_name(id: i32) -> String {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+pub fn capture_context(reason: &str) -> AppContext {
+    macos_capture_context(reason)
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
 pub fn capture_context(reason: &str) -> AppContext {
     AppContext {
         reason: reason.to_string(),
@@ -422,6 +427,70 @@ pub fn capture_context(reason: &str) -> AppContext {
 #[cfg(not(windows))]
 pub fn capture_foreground_monitor() -> Option<MonitorBounds> {
     None
+}
+
+/// macOS：用 NSWorkspace 取前台应用名（给 Prompt 规则 / 诊断用）。
+#[cfg(target_os = "macos")]
+fn macos_capture_context(reason: &str) -> AppContext {
+    use cocoa::base::{id, nil};
+    use cocoa::foundation::NSString;
+    use objc::{class, msg_send, sel, sel_impl};
+
+    let mut ctx = AppContext {
+        reason: reason.to_string(),
+        timestamp: chrono::Utc::now().timestamp_millis(),
+        // 无法廉价判断焦点是否在可编辑控件；放行注入，由 Cmd+V 交给前台 App
+        has_caret: true,
+        is_enabled: true,
+        is_keyboard_focusable: true,
+        ..Default::default()
+    };
+
+    unsafe {
+        let workspace: id = msg_send![class!(NSWorkspace), sharedWorkspace];
+        if workspace == nil {
+            return ctx;
+        }
+        let app: id = msg_send![workspace, frontmostApplication];
+        if app == nil {
+            return ctx;
+        }
+
+        let localized_name: id = msg_send![app, localizedName];
+        if localized_name != nil {
+            let name = nsstring_to_rust(localized_name);
+            ctx.process_name = name.clone();
+            ctx.window_title = name;
+        }
+
+        let bundle_id: id = msg_send![app, bundleIdentifier];
+        if bundle_id != nil {
+            ctx.exe_path = nsstring_to_rust(bundle_id);
+        }
+
+        let pid: i32 = msg_send![app, processIdentifier];
+        if pid > 0 {
+            ctx.pid = pid as u32;
+            ctx.hwnd = format!("pid:{}", pid);
+        }
+    }
+
+    ctx
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn nsstring_to_rust(s: cocoa::base::id) -> String {
+    use cocoa::foundation::NSString;
+    if s.is_null() {
+        return String::new();
+    }
+    let bytes = s.UTF8String();
+    if bytes.is_null() {
+        return String::new();
+    }
+    std::ffi::CStr::from_ptr(bytes)
+        .to_string_lossy()
+        .into_owned()
 }
 
 // ─── Win32 helpers ───

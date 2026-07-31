@@ -2,6 +2,7 @@
 
 pub mod types;
 pub mod prompt;
+pub mod audio_util;
 pub mod ai_openai_compat;
 pub mod ai_ollama;
 pub mod asr_doubao;
@@ -11,5 +12,6 @@ pub mod asr_qwen;
 pub mod asr_qwen_omni;
 pub mod asr_mimo;
 pub mod asr_qwen_realtime;
+pub mod asr_openai_compat;
 pub mod doubao_protocol;
 pub mod registry;

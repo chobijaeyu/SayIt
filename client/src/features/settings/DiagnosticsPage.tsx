@@ -20,8 +20,11 @@ interface HealthItem {
 
 // ASR 供应商 → 显示名映射
 const ASR_DISPLAY: Record<string, string> = {
+  openai_compat: 'OpenAI 兼容 ASR',
   doubao_v2: '豆包 ASR（Doubao-Seed-ASR-2.0）',
   qwen: '千问 ASR（qwen3-asr-flash）',
+  qwen_realtime: '千问 ASR 流式',
+  mimo: '小米 MiMo ASR',
   qwen_omni_35_plus: '千问 3.5 Omni Plus（qwen3.5-omni-plus-realtime）',
   qwen_omni_35_flash: '千问 3.5 Omni Flash（qwen3.5-omni-flash-realtime）',
   qwen_omni_flash: '千问 Omni Flash（qwen3-omni-flash-realtime）',
@@ -111,31 +114,26 @@ export default function DiagnosticsPage() {
 
     // ASR 检查
     if (workMode === 'cloud_api') {
-      const asrProvider = await getSetting('cloudAsr.provider', '') as string
+      const { buildCloudAsrConfig } = await import('@/services/cloudAsrConfig')
+      const { providerKey: asrProvider, config: asrConfig } = await buildCloudAsrConfig()
       if (!asrProvider) {
         items.push({ label: 'ASR', status: 'error', detail: '未配置供应商' })
       } else {
-        const asrApiKey = await getSetting('cloudAsr.apiKey', '') as string
         const displayName = ASR_DISPLAY[asrProvider] || asrProvider
-        if (!asrApiKey) {
+        if (!asrConfig.api_key) {
           items.push({ label: 'ASR', status: 'error', detail: `${displayName} — 未填写密钥` })
+        } else if (asrProvider === 'openai_compat' && (!asrConfig.api_url || !asrConfig.model)) {
+          items.push({ label: 'ASR', status: 'error', detail: `${displayName} — 未填写 URL 或模型` })
         } else {
           // 实际测试连通性
           try {
-            const isQwenOmni = asrProvider.startsWith('qwen_omni')
-            const qwenOmniModel = asrProvider === 'qwen_omni_35_plus' ? 'qwen3.5-omni-plus-realtime'
-              : asrProvider === 'qwen_omni_35_flash' ? 'qwen3.5-omni-flash-realtime'
-                : asrProvider === 'qwen_omni_flash' ? 'qwen3-omni-flash-realtime'
-                  : asrProvider === 'qwen_omni_turbo' ? 'qwen-omni-turbo-realtime' : undefined
             const result = await invoke<{ ok: boolean; message: string }>('test_asr_connection', {
-              config: {
-                provider: isQwenOmni ? 'qwen_omni' : asrProvider,
-                api_key: asrApiKey,
-                app_id: await getSetting('cloudAsr.appId', '') as string,
-                ...(isQwenOmni && qwenOmniModel && { extra: { model: qwenOmniModel } }),
-              },
+              config: asrConfig,
             })
-            items.push({ label: 'ASR', status: result.ok ? 'ok' : 'error', detail: result.ok ? displayName : `${displayName} — ${result.message}` })
+            const detailOk = asrProvider === 'openai_compat' && asrConfig.model
+              ? `${displayName}（${asrConfig.model}）`
+              : displayName
+            items.push({ label: 'ASR', status: result.ok ? 'ok' : 'error', detail: result.ok ? detailOk : `${displayName} — ${result.message}` })
           } catch (err) {
             items.push({ label: 'ASR', status: 'error', detail: `${displayName} — ${String(err)}` })
           }

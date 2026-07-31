@@ -12,13 +12,19 @@ import { getSetting, setSetting } from '@/services/store'
 import { getWorkMode } from '@/services/transcription'
 
 const AI_PROVIDERS = [
-  { value: 'openai_compat', label: 'OpenAI 兼容', urlPlaceholder: 'https://api.openai.com', modelPlaceholder: 'gpt-4o-mini' },
+  { value: 'openai_compat', label: 'OpenAI 兼容（OpenAI / OpenRouter / 自定义）', urlPlaceholder: 'https://api.openai.com 或 https://openrouter.ai/api', modelPlaceholder: 'gpt-4o-mini 或 openai/gpt-4o-mini' },
   { value: 'deepseek', label: 'DeepSeek', urlPlaceholder: 'https://api.deepseek.com', modelPlaceholder: 'deepseek-v4-flash' },
   { value: 'doubao', label: '豆包（火山方舟）', urlPlaceholder: 'https://ark.cn-beijing.volces.com/api/v3', modelPlaceholder: 'doubao-seed-2-0-lite-260215' },
   { value: 'qwen', label: '通义千问', urlPlaceholder: 'https://dashscope.aliyuncs.com/compatible-mode', modelPlaceholder: 'qwen-plus' },
   { value: 'mimo', label: '小米 MiMo', urlPlaceholder: 'https://api.xiaomimimo.com/v1', modelPlaceholder: 'mimo-v2.5-pro' },
   { value: 'ollama', label: 'Ollama', urlPlaceholder: 'http://127.0.0.1:11434', modelPlaceholder: 'qwen2.5:7b' },
 ]
+
+/** OpenAI 兼容 AI 的快捷预填（与 ASR 侧独立） */
+const OPENAI_AI_PRESETS = [
+  { id: 'openai', label: 'OpenAI', apiUrl: 'https://api.openai.com', model: 'gpt-4o-mini' },
+  { id: 'openrouter', label: 'OpenRouter', apiUrl: 'https://openrouter.ai/api', model: 'openai/gpt-4o-mini' },
+] as const
 
 interface TestResult { ok: boolean; message: string; elapsed_ms: number; detail?: string }
 
@@ -282,7 +288,7 @@ export default function AIProviderSection() {
             </p>
           ) : (
             <p className="mb-4 text-xs text-muted-foreground">
-              配置用于 AI 校对的供应商。首选推荐 DeepSeek deepseek-v4-flash 模型，其次推荐通义千问 qwen3.6-flash 模型。
+              与语音识别独立配置，可混搭（例如豆包 ASR + OpenRouter AI）。国外环境推荐 OpenAI 兼容；国内可用 DeepSeek / 通义。
             </p>
           )}
           <button
@@ -302,6 +308,29 @@ export default function AIProviderSection() {
                 ))}
               </select>
             </div>
+            {aiProvider === 'openai_compat' && (
+              <div className="flex flex-wrap gap-1.5">
+                {OPENAI_AI_PRESETS.map((p) => (
+                  <button
+                    key={p.id}
+                    type="button"
+                    onClick={() => {
+                      setAiApiUrl(p.apiUrl)
+                      if (!aiModel || !aiModels.includes(p.model)) {
+                        const next = aiModels.includes(p.model) ? aiModels : [p.model, ...aiModels]
+                        setAiModels(next)
+                        setAiModel(p.model)
+                      } else {
+                        setAiModel(p.model)
+                      }
+                    }}
+                    className="rounded-md border border-input-border px-2.5 py-1 text-xs text-muted-foreground transition-colors hover:border-primary/50"
+                  >
+                    预填 {p.label}
+                  </button>
+                ))}
+              </div>
+            )}
             <div>
               <label className="mb-1 block text-sm text-muted-foreground">
                 {aiProvider === 'ollama' ? 'Ollama 地址' : 'API 地址'}

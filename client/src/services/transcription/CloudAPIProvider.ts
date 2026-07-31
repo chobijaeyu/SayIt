@@ -6,6 +6,7 @@ import { isQwenOmniProvider, isStreamingDisplayReady, resolveQwenOmniModel } fro
 import { uint8ArrayToBase64 } from '@/lib/encoding'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
+import { buildCloudAsrConfig } from '../cloudAsrConfig'
 import { getSetting } from '../store'
 import { restoreHotwordSpacing } from '../textPostProcess'
 import { addRuntimeEvent } from '../debugLog'
@@ -29,6 +30,8 @@ interface AsrProviderConfig {
   provider: string
   api_key: string
   app_id: string
+  api_url?: string
+  model?: string
   extra?: Record<string, unknown>
 }
 
@@ -289,9 +292,8 @@ export class CloudAPIProvider implements TranscriptionProvider {
         return
       }
 
-      // 读取 ASR 配置
-      const asrProvider = await getSetting('cloudAsr.provider', 'doubao') as string
-      const isQwenOmni = isQwenOmniProvider(asrProvider)
+      // 读取 ASR 配置（session 内统一装配）
+      const { providerKey: asrProvider, config: asrConfigBuilt, isQwenOmni } = await buildCloudAsrConfig()
 
       let asrText = ''
       let asrMs = 0
@@ -329,23 +331,13 @@ export class CloudAPIProvider implements TranscriptionProvider {
         }
         const audioB64 = uint8ArrayToBase64(merged)
 
-        const asrApiKey = await getSetting('cloudAsr.apiKey', '') as string
-        const asrAppId = await getSetting('cloudAsr.appId', '') as string
-        const qwenOmniModel = resolveQwenOmniModel(asrProvider)
-
-        let omniInstructions: string | undefined
-        if (isQwenOmni) {
-          const savedPrompt = await getSetting('cloudAsr.omniSystemPrompt', '') as string
-          omniInstructions = savedPrompt || undefined
-        }
-
         const asrConfig: AsrProviderConfig = {
-          provider: isQwenOmni ? 'qwen_omni' : asrProvider,
-          api_key: asrApiKey,
-          app_id: asrAppId,
-          ...(isQwenOmni && {
-            extra: { model: qwenOmniModel, instructions: omniInstructions },
-          }),
+          provider: asrConfigBuilt.provider,
+          api_key: asrConfigBuilt.api_key,
+          app_id: asrConfigBuilt.app_id,
+          api_url: asrConfigBuilt.api_url || '',
+          model: asrConfigBuilt.model || '',
+          ...(asrConfigBuilt.extra && { extra: asrConfigBuilt.extra }),
         }
 
         addRuntimeEvent('info', 'cloud_api', '开始 ASR', { provider: asrProvider, durationSec })

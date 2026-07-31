@@ -22,8 +22,10 @@ export function resolveQwenOmniModel(provider: string): string | undefined {
 
 /** ASR 供应商 key → 显示用的模型 ID */
 const ASR_DISPLAY_MODEL_MAP: Record<string, string> = {
+  openai_compat: 'OpenAI-compatible ASR',
   doubao_v2: 'Doubao-Seed-ASR-2.0',
   qwen: 'qwen3-asr-flash',
+  qwen_realtime: 'qwen3-asr-flash-realtime',
   mimo: 'mimo-v2.5-asr',
   ...QWEN_OMNI_MODEL_MAP,
 }

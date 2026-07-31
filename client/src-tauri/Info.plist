@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>SayIt 需要麦克风权限以进行语音输入识别。</string>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>SayIt 需要辅助功能权限以监听快捷键并在其他应用中插入文字。</string>
+</dict>
+</plist>

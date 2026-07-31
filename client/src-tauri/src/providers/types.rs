@@ -37,6 +37,12 @@ pub struct AsrProviderConfig {
     pub api_key: String,
     #[serde(default)]
     pub app_id: String,
+    /// OpenAI 兼容等供应商的 API base（如 https://api.openai.com 或 https://openrouter.ai/api）
+    #[serde(default)]
+    pub api_url: String,
+    /// OpenAI 兼容等供应商的模型 ID（原样转发）
+    #[serde(default)]
+    pub model: String,
     /// 供应商特定的额外配置
     #[serde(default)]
     pub extra: serde_json::Value,

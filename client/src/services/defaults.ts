@@ -36,10 +36,14 @@ export const DEFAULTS: Record<string, unknown> = {
   'cloudAi.model': '',
 
   // ── ASR（云 API）──
-  'cloudAsr.provider': 'doubao_v2', // 可选: 'doubao_v2' | 'qwen' | 'qwen_realtime' | 'qwen_omni' | 'qwen_omni_turbo' | 'mimo'
+  'cloudAsr.provider': 'doubao_v2', // 可选: 'openai_compat' | 'doubao_v2' | 'qwen' | 'qwen_realtime' | 'qwen_omni*' | 'mimo'
   'cloudAsr.apiKey': '',
   'cloudAsr.appId': '', // 豆包需要
   'cloudAsr.omniSystemPrompt': '', // 千问 Omni 模式的 system prompt
+  // OpenAI 兼容 ASR（OpenAI / OpenRouter / 自定义网关）
+  'cloudAsr.openai_compat.apiUrl': 'https://api.openai.com',
+  'cloudAsr.openai_compat.apiKey': '',
+  'cloudAsr.openai_compat.model': 'gpt-4o-mini-transcribe',
 
   // ── ASR（本地）──
   'localAsr.modelId': 'sensevoice-small', // 可选: 'sensevoice-small' | 'paraformer-zh' | 'whisper-tiny'
