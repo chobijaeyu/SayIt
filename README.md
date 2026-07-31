@@ -288,8 +288,8 @@ cd backend && uvicorn app.main:app --port 8000
 ## Contributors
 
 <!-- ALL-CONTRIBUTORS-LIST:START -->
-| [<img src="https://github.com/crosswk.png" width="60"><br><sub>crosswk</sub>](https://github.com/crosswk)<br>原作者 | [<img src="https://avatars.githubusercontent.com/u/76263028" width="60"><br><sub>Claude (Anthropic)</sub>](https://claude.ai) | [<img src="https://github.com/chobijaeyu.png" width="60"><br><sub>chobijaeyu</sub>](https://github.com/chobijaeyu)<br>本 fork |
-|:---:|:---:|:---:|
+| [<img src="https://github.com/crosswk.png" width="60"><br><sub>crosswk</sub>](https://github.com/crosswk)<br>原作者 | [<img src="https://avatars.githubusercontent.com/u/76263028" width="60"><br><sub>Claude (Anthropic)</sub>](https://claude.ai) | [<img src="https://github.com/xai-org.png" width="60"><br><sub>Grok (xAI)</sub>](https://x.ai) | [<img src="https://github.com/chobijaeyu.png" width="60"><br><sub>chobijaeyu</sub>](https://github.com/chobijaeyu)<br>本 fork |
+|:---:|:---:|:---:|:---:|
 <!-- ALL-CONTRIBUTORS-LIST:END -->
 
 ## 许可证
