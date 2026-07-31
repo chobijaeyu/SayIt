@@ -4,7 +4,8 @@
 # random Identifier, and macOS Accessibility toggles stop applying.
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# Script lives in client/; Tauri project root is this directory.
+ROOT="$(cd "$(dirname "$0")" && pwd)"
 SRC="$ROOT/src-tauri/target/release/bundle/macos/SayIt.app"
 DEST="/Applications/SayIt.app"
 BUNDLE_ID="com.sayit.app"
