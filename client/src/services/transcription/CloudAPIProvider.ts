@@ -7,7 +7,7 @@ import { uint8ArrayToBase64 } from '@/lib/encoding'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { buildCloudAsrConfig } from '../cloudAsrConfig'
-import { getSetting } from '../store'
+import { getSetting, isTranslationPreset } from '../store'
 import { restoreHotwordSpacing } from '../textPostProcess'
 import { addRuntimeEvent } from '../debugLog'
 import type {
@@ -372,9 +372,25 @@ export class CloudAPIProvider implements TranscriptionProvider {
       // AI 校对（Qwen Omni 已内置 AI，跳过）
       let llmText = asrText
       let llmMs = 0
+      let llmFailed = false
+      let llmFailReason: string | undefined
 
       const disableAi = this.startOpts?.disableAi ?? false
-      if (!disableAi && !isQwenOmni) {
+      const translateMode = isTranslationPreset(this.startOpts?.presetId)
+
+      if (translateMode && isQwenOmni) {
+        // Qwen Omni 跳过独立 LLM，翻译 preset 无法保证目标语输出
+        llmFailed = true
+        llmText = ''
+        llmFailReason = '当前 ASR 为 Qwen Omni（无独立润色步骤），翻译模式不可用，请改用 OpenAI 兼容等供应商并开启 AI 整理'
+        addRuntimeEvent('warn', 'cloud_api', '翻译 preset 与 Qwen Omni 不兼容', {
+          presetId: this.startOpts?.presetId,
+        })
+      } else if (translateMode && disableAi) {
+        llmFailed = true
+        llmText = ''
+        llmFailReason = 'AI 整理已关闭，翻译模式无法生成目标语（未自动粘贴源语言原文）'
+      } else if (!disableAi && !isQwenOmni) {
         const aiProvider = await getSetting('cloudAi.provider', 'openai_compat') as string
         const aiApiUrl = await getSetting('cloudAi.apiUrl', '') as string
         const aiApiKey = await getSetting('cloudAi.apiKey', '') as string
@@ -384,27 +400,60 @@ export class CloudAPIProvider implements TranscriptionProvider {
           const aiConfig: AiProviderConfig = {
             provider: aiProvider, api_url: aiApiUrl, api_key: aiApiKey, model: aiModel,
           }
-          addRuntimeEvent('info', 'cloud_api', '开始 AI 校对', { provider: aiProvider, model: aiModel })
+          addRuntimeEvent('info', 'cloud_api', '开始 AI 校对', {
+            provider: aiProvider,
+            model: aiModel,
+            translateMode,
+            presetId: this.startOpts?.presetId,
+          })
 
           try {
             const aiResult = await invoke<AiResult>('cloud_polish', {
               request: { text: asrText, ai_config: aiConfig, system_prompt: this.startOpts?.systemPrompt || null },
             })
-            llmText = aiResult.text || asrText
+            const polished = (aiResult.text || '').trim()
+            if (!polished) {
+              if (translateMode) {
+                llmFailed = true
+                llmText = ''
+                llmFailReason = 'AI 返回空结果，未自动粘贴源语言原文'
+              } else {
+                llmText = asrText
+              }
+            } else {
+              llmText = polished
+            }
             llmMs = aiResult.elapsed_ms
           } catch (err) {
-            addRuntimeEvent('warn', 'cloud_api', 'AI 校对失败，使用 ASR 原文', { error: String(err) })
+            if (translateMode) {
+              llmFailed = true
+              llmText = ''
+              llmFailReason = `翻译失败：${String(err)}`
+              addRuntimeEvent('warn', 'cloud_api', '翻译失败，fail-closed 不粘贴 ASR 原文', {
+                error: String(err),
+                presetId: this.startOpts?.presetId,
+              })
+            } else {
+              addRuntimeEvent('warn', 'cloud_api', 'AI 校对失败，使用 ASR 原文', { error: String(err) })
+            }
           }
+        } else if (translateMode) {
+          llmFailed = true
+          llmText = ''
+          llmFailReason = '未配置 AI 供应商，翻译模式无法运行'
         }
       }
 
       const totalMs = Math.round(performance.now() - startTime)
-      addRuntimeEvent('info', 'cloud_api', '处理完成', { durationSec, asrMs, llmMs, totalMs })
+      addRuntimeEvent('info', 'cloud_api', '处理完成', {
+        durationSec, asrMs, llmMs, totalMs, llmFailed, translateMode,
+      })
 
       const omniModel = isQwenOmni ? resolveQwenOmniModel(asrProvider) : undefined
 
       this.callbacks.onFinal?.({
         asrText, llmText, asrMs, llmMs, durationSec,
+        ...(llmFailed && { llmFailed: true, llmFailReason }),
         ...(isQwenOmni && { asrEngine: 'qwen_omni', asrModel: omniModel }),
       })
       this.callbacks.onDone?.()

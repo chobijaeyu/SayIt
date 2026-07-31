@@ -22,6 +22,11 @@ export interface FinalResult {
   durationSec: number
   asrEngine?: string
   asrModel?: string
+  /**
+   * 跨语种 preset 下 LLM 未成功时置 true：不得把源语言 ASR 原文当结果自动粘贴。
+   */
+  llmFailed?: boolean
+  llmFailReason?: string
 }
 
 export interface TranscriptionCallbacks {
@@ -45,6 +50,8 @@ export interface StartOptions {
   language?: string
   /** 是否开启流式实时显示：识别过程中把中间结果实时推给悬浮窗 */
   streamingDisplay?: boolean
+  /** 当前解析后的 preset id（用于翻译 fail-closed 等） */
+  presetId?: string
 }
 
 export interface StopOptions {

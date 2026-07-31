@@ -93,13 +93,32 @@ export class OverlayService {
     return OVERLAY_WIDTH_PRESETS[this.widthPreset].barCount
   }
 
-  showWaiting() {
+  showWaiting(modeLabel?: string) {
     this.clearFallbackHideTimer()
     void bridge.presentOverlay({
       state: 'waiting',
       elapsedSec: 0,
+      // 复用 toastText 在 waiting 态展示「最终解析后的模式名」
+      ...(modeLabel ? { toastText: modeLabel } : {}),
       ...this.getCommonPayload(),
     })
+  }
+
+  /** 翻译等 fail-closed：不自动粘贴，提示用户 */
+  showTranslateFailed(reason?: string) {
+    void bridge.presentOverlay({
+      state: 'toast',
+      toastText: reason?.trim()
+        ? `翻译未完成：${reason.trim().slice(0, 80)}`
+        : '翻译失败，未自动粘贴源语言原文',
+      toastTone: 'warn',
+      ...this.getCommonPayload(),
+    })
+    this.clearFallbackHideTimer()
+    this.fallbackHideId = setTimeout(() => {
+      void bridge.hideOverlay()
+      this.clearFallbackHideTimer()
+    }, 2800)
   }
 
   startListeningTicker() {

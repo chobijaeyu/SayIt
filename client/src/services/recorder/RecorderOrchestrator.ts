@@ -1007,9 +1007,14 @@ export class RecorderOrchestrator {
       summary: this.currentPromptResolution.summary,
     })
 
-    // Show overlay immediately in "waiting/preparing" state
+    // Show overlay immediately in "waiting/preparing" state；展示最终解析后的模式名
     this.overlayService.clearFallbackHideTimer()
-    this.overlayService.showWaiting()
+    const modeLabel = this.currentPromptResolution
+      ? (this.currentPromptResolution.matchedRule
+        ? `${this.currentPromptResolution.preset.name}`
+        : this.currentPromptResolution.preset.name)
+      : undefined
+    this.overlayService.showWaiting(modeLabel)
 
     this.finalHandledInCurrentRun = false
     this.audioSentSamples = 0
@@ -1049,6 +1054,7 @@ export class RecorderOrchestrator {
       }, 240_000) // 4 minutes
     }
 
+    const resolvedPresetId = this.currentPromptResolution?.preset.id
     const promptOpts = this.currentPromptResolution
       ? {
         systemPrompt: this.cachedAiEnabled ? this.currentPromptResolution.systemPrompt : undefined,
@@ -1058,6 +1064,7 @@ export class RecorderOrchestrator {
         hotwords: this.cachedHotwords.length > 0 ? this.cachedHotwords : undefined,
         language: this.cachedLanguage || undefined,
         streamingDisplay: this.cachedStreamingDisplay,
+        presetId: resolvedPresetId,
       }
       : {
         disableAi: !this.cachedAiEnabled,
@@ -1066,6 +1073,7 @@ export class RecorderOrchestrator {
         hotwords: this.cachedHotwords.length > 0 ? this.cachedHotwords : undefined,
         language: this.cachedLanguage || undefined,
         streamingDisplay: this.cachedStreamingDisplay,
+        presetId: this.cachedActivePresetId,
       }
 
     // Wrap the async setup so stopRecording can wait for it
@@ -1619,6 +1627,59 @@ export class RecorderOrchestrator {
     context: TimedOutProcessingContext,
     options: { allowInsertionWhenIdle: boolean; source: 'processing' | 'late_after_timeout' },
   ) {
+    // 跨语种 preset：LLM 失败时 fail-closed，绝不把中文 ASR 原文自动贴进外语场景
+    if (result.llmFailed) {
+      addRuntimeEvent('warn', 'recorder', '翻译/LLM 失败，跳过自动粘贴', {
+        reason: result.llmFailReason,
+        asrLen: result.asrText?.length || 0,
+        source: options.source,
+      })
+      try {
+        if (await getSetting('historyEnabled', true)) {
+          let audioFilePath: string | undefined
+          const recordId = Date.now().toString(36) + Math.random().toString(36).slice(2, 6)
+          const saveAudioEnabled = await getSetting('audioRetentionEnabled', true)
+          const audioDur = context.audioDurationSec
+          const wallSec = context.wallTimeSec > 0 ? context.wallTimeSec : audioDur
+          if (saveAudioEnabled && this.recordedChunks.length > 0) {
+            try {
+              const savedPath = await saveRecordingAudio(recordId, this.recordedChunks)
+              if (savedPath) audioFilePath = savedPath
+            } catch { /* ignore */ }
+          }
+          const providerMeta = await this.buildProviderMetadata(result)
+          await addHistory({
+            id: recordId,
+            timestamp: Date.now(),
+            asrText: result.asrText || '',
+            llmText: '',
+            asrMs: result.asrMs,
+            llmMs: result.llmMs,
+            durationSec: wallSec,
+            audioDurationSec: audioDur > 0 ? audioDur : undefined,
+            asrDurationSec: result.durationSec > 0 ? result.durationSec : undefined,
+            charCount: 0,
+            isEmpty: true,
+            audioFilePath,
+            ...this.buildHistoryMetadata(context.promptResolution),
+            ...providerMeta,
+          })
+          void bridge.emit('history-updated')
+        }
+      } catch (error) {
+        addRuntimeEvent('warn', 'recorder', '写入历史记录失败（翻译失败分支）', { error: String(error) })
+      }
+      // 仍把 ASR 原文放进剪贴板，方便用户手动用，但不 Cmd+V 进输入框
+      if (result.asrText?.trim()) {
+        await this.copyTextSafely(result.asrText, 'translation_llm_failed')
+      }
+      if (this.state === 'processing' || options.allowInsertionWhenIdle) {
+        this.overlayService.showTranslateFailed(result.llmFailReason)
+        this.resetToIdle({ keepOverlay: true })
+      }
+      return
+    }
+
     // 极速模式下 llmText === asrText（后端未经 LLM 处理时直接复制 asrText）
     // 此时文本可参与智能分段（是否分段由用户开关决定，见 applyTextTransforms）
     const needsSegment = !result.llmText || result.llmText === result.asrText

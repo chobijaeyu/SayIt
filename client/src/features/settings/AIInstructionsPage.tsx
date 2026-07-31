@@ -13,6 +13,7 @@ import {
   deletePromptPreset,
   getPromptPresets,
   getPresetShortcuts,
+  RECOMMENDED_PRESET_SHORTCUTS,
   savePromptPreset,
   setActivePresetId,
   setPresetShortcuts,
@@ -99,6 +100,22 @@ export default function AIInstructionsPage() {
     })
   }
 
+  /** 可选一键套用推荐绑定（不覆盖用户已有其它自定义键，只写入推荐表中的 id） */
+  const handleApplyRecommendedShortcuts = async () => {
+    const next: Record<string, string> = { ...presetShortcuts }
+    // 先清掉将被推荐键占用的旧映射
+    const recommendedAccels = new Set(Object.values(RECOMMENDED_PRESET_SHORTCUTS))
+    for (const [id, accel] of Object.entries(next)) {
+      if (recommendedAccels.has(accel) || id in RECOMMENDED_PRESET_SHORTCUTS) {
+        delete next[id]
+      }
+    }
+    Object.assign(next, RECOMMENDED_PRESET_SHORTCUTS)
+    setPresetShortcutsState(next)
+    await setPresetShortcuts(next)
+    bridge.notifyShortcutsChanged()
+  }
+
   const handleSaveAppRule = async (rule: AppPromptRule) => {
     const nextRules = appPromptRules
       .map((item) => (item.id === rule.id ? rule : item))
@@ -123,7 +140,8 @@ export default function AIInstructionsPage() {
     <div className="mx-auto max-w-4xl">
       <h1 className="mb-2 text-2xl font-bold">AI 整理</h1>
       <p className="mb-6 text-sm text-muted-foreground">
-        配置 AI 如何整理识别出的文字（校对开关、提示词预设、按应用的规则）。选择使用哪家 AI，请前往「AI 供应商」。
+        配置 AI 如何整理识别出的文字（校对开关、提示词预设、按应用的规则）。
+        按住说话键只录音；切换润色模式决定中文整理或中→英/日翻译。选择使用哪家 AI，请前往「AI 供应商」。
       </p>
 
       <div className="space-y-6">
@@ -143,6 +161,7 @@ export default function AIInstructionsPage() {
           onSavePreset={handleSavePreset}
           onDeletePreset={handleDeletePreset}
           onSetPresetShortcut={handleSetPresetShortcut}
+          onApplyRecommendedShortcuts={() => { void handleApplyRecommendedShortcuts() }}
         />
 
         <AppPromptRulesSection

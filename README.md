@@ -52,6 +52,7 @@ SayIt 的产品设计、Windows 客户端、服务端、云 API 模式、AI 润�
 - **OpenRouter URL 修正**：避免把 `openrouter.ai/api` 误拼成 `/api/v3` 导致 404  
 - **校对场景关闭 reasoning**：DeepSeek / OpenRouter 上减少思考 token，降低延迟尖刺  
 - 推荐模型后缀：`deepseek/deepseek-v4-flash:nitro`（速度优先路由，非固定某一 provider）  
+- **润色 / 翻译一体**：内置「中翻日忠实校对」与「中翻英」同属跨语种 preset；推荐快捷键 Alt+1…4；翻译失败不自动粘贴源语言  
 
 ### 热键与录音体验（macOS）
 

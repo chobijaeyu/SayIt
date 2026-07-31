@@ -338,17 +338,28 @@ export default function Overlay() {
             }}
           >
             {state === 'waiting' && (
-              <div className="flex items-center gap-[3px]" style={{ height: '20px' }}>
-                {[0, 1, 2].map((i) => (
-                  <div
-                    key={i}
-                    className="h-[3px] w-[3px] rounded-full"
-                    style={{
-                      backgroundColor: 'var(--overlay-text-dim)',
-                      animation: `dot-pulse 1s ease-in-out ${i * 0.15}s infinite`,
-                    }}
-                  />
-                ))}
+              <div className="flex items-center gap-2" style={{ height: '20px' }}>
+                <div className="flex items-center gap-[3px]">
+                  {[0, 1, 2].map((i) => (
+                    <div
+                      key={i}
+                      className="h-[3px] w-[3px] rounded-full"
+                      style={{
+                        backgroundColor: 'var(--overlay-text-dim)',
+                        animation: `dot-pulse 1s ease-in-out ${i * 0.15}s infinite`,
+                      }}
+                    />
+                  ))}
+                </div>
+                {toastText ? (
+                  <span
+                    className="max-w-[140px] truncate text-[11px] leading-none"
+                    style={{ color: 'var(--overlay-text-dim)' }}
+                    title={toastText}
+                  >
+                    {toastText}
+                  </span>
+                ) : null}
               </div>
             )}
 
